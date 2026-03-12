@@ -1,0 +1,59 @@
+# ── VLA-Robot-Learning Configuration ──────────────────────────────────────────
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  num_actions:    8           # number of discrete actions in your task
+  history_len:    4           # number of (action, reward) history steps
+  num_vis_frames: 3           # number of video frames fed to the vision encoder
+  fusion_layers:  6           # causal transformer depth
+  fusion_heads:   8           # attention heads in fusion transformer
+  dropout:        0.1
+  freeze_clip:    true        # keep CLIP backbone frozen (recommended to start)
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+data:
+  episodes_path:       null   # path to .pkl file with real episode data; null = use synthetic
+  synthetic_episodes:  200    # number of random episodes when no real data provided
+  ep_len:              30     # average episode length for synthetic data
+  img_size:            224    # resize all frames to this square size
+
+# ── Supervised Fine-Tuning (Behavioral Cloning) ───────────────────────────────
+training:
+  device:          auto       # "cuda", "mps", "cpu", or "auto"
+  epochs:          50
+  batch_size:      32
+  lr:              3e-4
+  lr_min:          1e-6
+  weight_decay:    1e-4
+  label_smoothing: 0.05
+  grad_clip:       1.0
+  val_fraction:    0.1
+  num_workers:     2
+  save_every:      10
+  output_dir:      checkpoints/
+
+# ── Online RL Fine-Tuning ─────────────────────────────────────────────────────
+rl:
+  epochs:              200
+  num_rollouts:        4      # rollout episodes per update step
+  max_episode_steps:   50
+  gamma:               0.99   # discount factor
+  lr:                  1e-5   # lower LR than SFT to avoid forgetting
+  weight_decay:        1e-4
+  grad_clip:           1.0
+  entropy_coef:        0.01   # exploration bonus
+  vf_coef:             0.5    # value function loss weight
+  kl_coef:             0.1    # KL penalty against BC checkpoint
+  save_every:          20
+
+# ── Environment ───────────────────────────────────────────────────────────────
+env:
+  env_id:              dummy          # "dummy" | Gym env id e.g. "CartPole-v1"
+  instruction:         "complete the task"
+  domain_randomization: false
+  obs_noise_std:       5.0
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+eval:
+  num_episodes:      50
+  success_threshold: 1.0      # min total return to count as success
