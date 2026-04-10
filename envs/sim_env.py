@@ -169,6 +169,245 @@ class SimEnv(BaseEnv):
             self._gym_env.close()
 
 
+# ── MetaWorld wrapper ──────────────────────────────────────────────────────────
+
+class MetaWorldEnv(BaseEnv):
+    """
+    Wraps a Meta-World ML1 / MT50 task and exposes the VLA interface.
+
+    Key additions over the plain Gym wrapper:
+      • `info["dist_delta"]` — signed change in end-effector–to–goal Euclidean
+        distance between consecutive steps. Positive = moved away, negative = closer.
+        This populates Stream 3b (consequence language encoder) with a real signal.
+      • Action discretisation — MetaWorld has a continuous 4-DoF action space.
+        We project it to `num_actions` discrete bins via a fixed codebook built
+        from a uniform grid over [-1, 1]^4.
+      • Language instruction — generated from the task name automatically.
+
+    Install: pip install metaworld
+
+    Example config:
+      env:
+        env_id: metaworld-reach-v2    # any metaworld task name
+        num_actions: 8                # discrete bins
+    """
+
+    # Task name → human-readable instruction
+    _TASK_INSTRUCTIONS: Dict[str, str] = {
+        "reach-v2":          "move the robot arm to reach the target position",
+        "push-v2":           "push the puck to the target location",
+        "pick-place-v2":     "pick up the object and place it at the target",
+        "door-open-v2":      "grasp the door handle and open the door",
+        "drawer-close-v2":   "push the drawer closed",
+        "drawer-open-v2":    "pull the drawer open",
+        "button-press-v2":   "press the button down",
+        "peg-insert-side-v2":"insert the peg into the hole from the side",
+        "window-open-v2":    "slide the window open",
+        "window-close-v2":   "slide the window closed",
+    }
+
+    def __init__(self, cfg: dict):
+        import metaworld
+        env_cfg      = cfg.get("env", {})
+        task_name    = env_cfg.get("env_id", "reach-v2").replace("metaworld-", "")
+        num_actions  = cfg["model"]["num_actions"]
+        self._img    = cfg["data"].get("img_size", 224)
+
+        ml1 = metaworld.ML1(task_name)
+        self._env = ml1.train_classes[task_name]()
+        task      = np.random.choice(ml1.train_tasks)
+        self._env.set_task(task)
+
+        self._task_name  = task_name
+        self._num_actions = num_actions
+        self._instruction = self._TASK_INSTRUCTIONS.get(
+            task_name, f"complete the {task_name.replace('-', ' ')} task"
+        )
+
+        # Build discrete action codebook: num_actions centroids in [-1,1]^4
+        self._action_dim  = 4    # MetaWorld: xyz delta + gripper
+        self._codebook    = self._build_codebook(num_actions)
+        self._prev_dist   = None
+
+        print(f"[MetaWorldEnv] Task: {task_name} | "
+              f"Actions: {num_actions} discrete bins | "
+              f"Instruction: \"{self._instruction}\"")
+
+    def _build_codebook(self, num_actions: int) -> np.ndarray:
+        """
+        Simple codebook: evenly space `num_actions` points across the
+        action space principal directions. Each action moves along a
+        different axis or combination.
+        """
+        rng     = np.linspace(-1, 1, max(2, int(np.ceil(num_actions ** 0.25))))
+        grid    = np.array(np.meshgrid(rng, rng, rng, rng)).T.reshape(-1, 4)
+        idx     = np.linspace(0, len(grid) - 1, num_actions, dtype=int)
+        return grid[idx].astype(np.float32)
+
+    def _dist_to_goal(self) -> float:
+        obs  = self._env._get_obs()
+        hand = obs[:3]
+        goal = self._env._get_pos_goal()
+        return float(np.linalg.norm(hand - goal))
+
+    def reset(self) -> Dict[str, Any]:
+        self._env.reset()
+        self._prev_dist = self._dist_to_goal()
+        frame = self._render(self._img)
+        return {"frame": frame, "instruction": self._instruction}
+
+    def step(self, action_idx: int) -> Tuple[Dict[str, Any], float, bool, Dict]:
+        cont_action = self._codebook[action_idx % self._num_actions]
+        _, reward, done, info = self._env.step(cont_action)
+        frame = self._render(self._img)
+
+        curr_dist  = self._dist_to_goal()
+        dist_delta = float(curr_dist - self._prev_dist)   # negative = closer
+        self._prev_dist = curr_dist
+
+        info["dist_delta"] = dist_delta
+        obs = {"frame": frame, "instruction": self._instruction}
+        return obs, float(reward), bool(done), info
+
+    def _render(self, size: int) -> np.ndarray:
+        frame = self._env.render(offscreen=True)
+        if frame.shape[:2] != (size, size):
+            from PIL import Image
+            frame = np.array(Image.fromarray(frame).resize((size, size)))
+        return frame
+
+    def close(self):
+        self._env.close()
+
+
+# ── BabyAI / MiniGrid wrapper ─────────────────────────────────────────────────
+
+class BabyAIEnv(BaseEnv):
+    """
+    Wraps a BabyAI / MiniGrid environment for cheap language-grounded RL.
+
+    Why BabyAI for VLLA?
+      • Procedurally generated language instructions ("go to the red ball")
+      • Discrete action space (7 actions) — maps cleanly to verbalization
+      • Dense enough episodes (H~100 steps) to exercise the history encoder
+      • dist_delta = L1 distance change to goal object, exposable per step
+      • Fast to run: 1000 episodes in <1min on CPU
+
+    Install: pip install minigrid
+
+    Config:
+      env:
+        env_id: babyai-GoToLocal-v0
+        num_actions: 7
+
+    Exposed info keys:
+      dist_delta : signed change in Manhattan distance to target object
+                   (negative = closer, positive = farther)
+      mission    : the full language instruction string
+    """
+
+    # 7 MiniGrid primitive actions (matches minigrid.core.actions.Actions)
+    ACTION_NAMES = [
+        "turn left",
+        "turn right",
+        "move forward",
+        "pick up the object",
+        "drop the object",
+        "toggle the door or switch",
+        "done",
+    ]
+
+    def __init__(self, cfg: dict):
+        env_cfg    = cfg.get("env", {})
+        env_id     = env_cfg.get("env_id", "BabyAI-GoToLocal-v0")
+        self._img  = cfg["data"].get("img_size", 224)
+
+        try:
+            import gymnasium as gym
+            self._env = gym.make(env_id, render_mode="rgb_array")
+            print(f"[BabyAIEnv] Loaded: {env_id}")
+        except Exception as e:
+            raise RuntimeError(f"BabyAI env '{env_id}' could not be loaded: {e}") from e
+
+        self._instruction  = ""
+        self._target_pos   = None
+        self._prev_dist    = None
+
+    def reset(self) -> Dict[str, Any]:
+        obs, _ = self._env.reset()
+        self._instruction = obs.get("mission", "complete the task")
+        self._target_pos  = self._find_target()
+        self._prev_dist   = self._agent_dist_to_target()
+        frame = self._render()
+        return {"frame": frame, "instruction": self._instruction}
+
+    def step(self, action_idx: int) -> Tuple[Dict[str, Any], float, bool, Dict]:
+        obs, reward, terminated, truncated, info = self._env.step(action_idx)
+        done = terminated or truncated
+
+        self._instruction = obs.get("mission", self._instruction)
+        self._target_pos  = self._find_target()
+        curr_dist         = self._agent_dist_to_target()
+        dist_delta        = float(curr_dist - self._prev_dist)
+        self._prev_dist   = curr_dist
+
+        info["dist_delta"] = dist_delta
+        frame = self._render()
+        return {"frame": frame, "instruction": self._instruction}, float(reward), done, info
+
+    def _find_target(self) -> Optional[Tuple[int, int]]:
+        """Return grid position of the mission target object if findable."""
+        try:
+            grid = self._env.unwrapped.grid
+            for i in range(grid.width):
+                for j in range(grid.height):
+                    cell = grid.get(i, j)
+                    if cell is not None and cell.type not in ("wall", "floor", "door"):
+                        return (i, j)
+        except Exception:
+            pass
+        return None
+
+    def _agent_dist_to_target(self) -> float:
+        if self._target_pos is None:
+            return 0.0
+        agent_pos = self._env.unwrapped.agent_pos
+        return float(abs(agent_pos[0] - self._target_pos[0])
+                   + abs(agent_pos[1] - self._target_pos[1]))
+
+    def _render(self) -> np.ndarray:
+        frame = self._env.render()   # (H, W, 3)
+        if frame.shape[:2] != (self._img, self._img):
+            from PIL import Image
+            frame = np.array(Image.fromarray(frame).resize((self._img, self._img)))
+        return frame
+
+    def close(self):
+        self._env.close()
+
+
+# ── factory ────────────────────────────────────────────────────────────────────
+
+def make_env(cfg: dict) -> BaseEnv:
+    """
+    Build the correct environment from config.
+
+    env_id routing:
+      "dummy"               → RandomDummyEnv   (no install required)
+      "babyai-*" / "BabyAI-*" → BabyAIEnv    (pip install minigrid)
+      "metaworld-*"         → MetaWorldEnv     (pip install metaworld)
+      anything else         → SimEnv (Gymnasium wrapper)
+    """
+    env_id = cfg.get("env", {}).get("env_id", "dummy")
+    if env_id == "dummy":
+        return SimEnv(cfg)
+    if env_id.lower().startswith(("babyai", "minigrid")):
+        return BabyAIEnv(cfg)
+    if env_id.lower().startswith("metaworld"):
+        return MetaWorldEnv(cfg)
+    return SimEnv(cfg)
+
+
 # ── Real robot environment stub ────────────────────────────────────────────────
 
 class RealEnv(BaseEnv):

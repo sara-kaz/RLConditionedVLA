@@ -1,59 +1,112 @@
-# ── VLA-Robot-Learning Configuration ──────────────────────────────────────────
+# ── VLLA-Robot-Learning Configuration ─────────────────────────────────────────
+# Vision-Language-Language-Action model with dual semantic+numerical feedback.
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:
-  num_actions:    8           # number of discrete actions in your task
+  num_actions:    8           # discrete action space size
   history_len:    4           # number of (action, reward) history steps
-  num_vis_frames: 3           # number of video frames fed to the vision encoder
-  fusion_layers:  6           # causal transformer depth
+  num_vis_frames: 3           # number of video frames per observation
+  fusion_layers:  6           # causal fusion transformer depth
   fusion_heads:   8           # attention heads in fusion transformer
+  d_model:        256         # shared embedding dimension
+  d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
   dropout:        0.1
-  freeze_clip:    true        # keep CLIP backbone frozen (recommended to start)
+  freeze_clip:    true        # keep CLIP backbone frozen (recommended)
+
+# ── VLLA-Specific Settings ─────────────────────────────────────────────────────
+vlla:
+  # Ablation flags: set any to false to run ablation experiments
+  use_lang_feedback:      true    # Stream 3: action language feedback [core novelty]
+  use_temporal_history:   true    # TemporalHistoryTransformer over numerical history
+  use_reward_gate:        true    # reward-conditioned gate on semantic feedback
+  use_consequence_token:  true    # Stream 3b: separate CLIP token for action outcome [NEW]
+                                  # encodes WHAT HAPPENED (not what action was taken)
+                                  # strings generated dynamically from reward + state_delta
+                                  # token sequence: L_instr | L_action | L_consequence | V | H | CLS
+
+  # Auxiliary contrastive alignment loss coefficient (λ_align)
+  # Applied to BOTH action and consequence alignment terms (averaged).
+  # Set to 0.0 to ablate all alignment losses.
+  alignment_loss_coef:    0.1
+
+  # Custom action vocabulary (null = use built-in generic descriptions)
+  # Override per environment, e.g.:
+  #   action_vocab:
+  #     0: "I moved the robot arm to the left"
+  #     1: "I opened the gripper"
+  action_vocab: null
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 data:
-  episodes_path:       null   # path to .pkl file with real episode data; null = use synthetic
-  synthetic_episodes:  200    # number of random episodes when no real data provided
-  ep_len:              30     # average episode length for synthetic data
-  img_size:            224    # resize all frames to this square size
+  episodes_path:       null     # path to .pkl file; null = use synthetic data
+  synthetic_episodes:  200      # episodes to generate when no real data provided
+  ep_len:              30       # average episode length for synthetic data
+  img_size:            224      # resize all frames to this square size
 
-# ── Supervised Fine-Tuning (Behavioral Cloning) ───────────────────────────────
+# ── Supervised Fine-Tuning (Behavioural Cloning) ──────────────────────────────
 training:
-  device:          auto       # "cuda", "mps", "cpu", or "auto"
+  device:          auto         # "cuda" | "mps" | "cpu" | "auto"
   epochs:          50
   batch_size:      32
   lr:              3e-4
   lr_min:          1e-6
   weight_decay:    1e-4
-  label_smoothing: 0.05
+  label_smoothing: 0.05         # prevents overconfidence in BC phase
   grad_clip:       1.0
   val_fraction:    0.1
   num_workers:     2
   save_every:      10
   output_dir:      checkpoints/
 
-# ── Online RL Fine-Tuning ─────────────────────────────────────────────────────
+# ── Online RL Fine-Tuning ──────────────────────────────────────────────────────
 rl:
   epochs:              200
-  num_rollouts:        4      # rollout episodes per update step
+  num_rollouts:        4         # rollout episodes per gradient update
   max_episode_steps:   50
-  gamma:               0.99   # discount factor
-  lr:                  1e-5   # lower LR than SFT to avoid forgetting
+  gamma:               0.99      # discount factor
+  lr:                  1e-5      # lower than SFT to prevent catastrophic forgetting
   weight_decay:        1e-4
   grad_clip:           1.0
-  entropy_coef:        0.01   # exploration bonus
-  vf_coef:             0.5    # value function loss weight
-  kl_coef:             0.1    # KL penalty against BC checkpoint
-  save_every:          20
+  entropy_coef:        0.01      # exploration bonus coefficient
+  vf_coef:             0.5       # value function loss weight
+  kl_coef:             0.1       # KL divergence penalty against BC policy
 
-# ── Environment ───────────────────────────────────────────────────────────────
+# ── Environment ────────────────────────────────────────────────────────────────
 env:
-  env_id:              dummy          # "dummy" | Gym env id e.g. "CartPole-v1"
-  instruction:         "complete the task"
+  env_id:               dummy    # "dummy" | any Gym/MiniGrid env id
+  instruction:          "complete the task"
   domain_randomization: false
-  obs_noise_std:       5.0
+  obs_noise_std:        5.0
 
-# ── Evaluation ────────────────────────────────────────────────────────────────
+# ── Evaluation ─────────────────────────────────────────────────────────────────
 eval:
   num_episodes:      50
-  success_threshold: 1.0      # min total return to count as success
+  success_threshold: 1.0         # min total return to count as success
+
+# ── Ablation Study Presets ─────────────────────────────────────────────────────
+# To run an ablation, override the vlla section from the command line or
+# create a separate config file that inherits these defaults.
+#
+# Ablation A — base VLA (no language feedback):
+#   vlla.use_lang_feedback: false
+#
+# Ablation B — no temporal history transformer:
+#   vlla.use_temporal_history: false
+#
+# Ablation C — no reward gate:
+#   vlla.use_reward_gate: false
+#
+# Ablation D — no contrastive alignment loss:
+#   vlla.alignment_loss_coef: 0.0
+#
+# Ablation E — no language feedback AND no temporal history (minimal model):
+#   vlla.use_lang_feedback: false
+#   vlla.use_temporal_history: false
+#
+# Ablation F — action token only, no consequence token (original Stream 3):
+#   vlla.use_consequence_token: false
+#
+# Ablation G — consequence token only, no action token (isolate outcome signal):
+#   vlla.use_lang_feedback: true
+#   vlla.use_consequence_token: true
+#   action_vocab: null   # action token still present; consequence ablated separately above
