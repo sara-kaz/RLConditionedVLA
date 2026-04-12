@@ -12,10 +12,10 @@ ftfy
 regex
 tqdm
 
-# Simulation (optional — install only what you use)
-# gymnasium>=0.29.0
-# gym-robotics>=1.3.0          # FrankaKitchen, FetchReach
-# minigrid>=2.3.0              # MiniGrid envs
+# Simulation
+gymnasium>=0.29.0
+gym-robotics>=1.3.0
+minigrid>=2.3.0
 
 # Visualization
 matplotlib>=3.7.0

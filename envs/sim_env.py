@@ -401,7 +401,10 @@ def make_env(cfg: dict) -> BaseEnv:
     env_id = cfg.get("env", {}).get("env_id", "dummy")
     if env_id == "dummy":
         return SimEnv(cfg)
-    if env_id.lower().startswith(("babyai", "minigrid")):
+    if env_id.lower().startswith("minigrid"):
+        from envs.minigrid_env import MiniGridEnv
+        return MiniGridEnv(cfg)
+    if env_id.lower().startswith("babyai"):
         return BabyAIEnv(cfg)
     if env_id.lower().startswith("metaworld"):
         return MetaWorldEnv(cfg)

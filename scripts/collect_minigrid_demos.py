@@ -1,0 +1,178 @@
+"""
+collect_minigrid_demos.py
+=========================
+Collect MiniGrid demonstration trajectories and save them in the episode
+format expected by TrajectoryDataset / sft_trainer.py:
+
+  episode = {
+      "frames":      np.ndarray  (T, H, W, 3) uint8
+      "instruction": str
+      "actions":     np.ndarray  (T,) int64
+      "rewards":     np.ndarray  (T,) float32
+  }
+
+Policy options (--policy):
+  random     — uniformly random actions (baseline; many episodes won't succeed)
+  forward    — biased toward 'move forward' (action 2) to reach goal faster
+
+For MiniGrid-Empty-5x5-v0 the forward-biased policy succeeds ~30% of the time
+within 50 steps, giving a reasonable mix of success and failure demonstrations.
+
+Usage:
+  # Collect 200 episodes, save to data/minigrid_demos.pkl
+  python scripts/collect_minigrid_demos.py
+
+  # Custom settings
+  python scripts/collect_minigrid_demos.py \
+      --env MiniGrid-Empty-5x5-v0 \
+      --episodes 500 \
+      --max-steps 100 \
+      --policy forward \
+      --output data/minigrid_demos.pkl \
+      --seed 42
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import numpy as np
+from envs.minigrid_env import MiniGridEnv
+from data.trajectory_dataset import save_episodes
+
+
+# ── Policies ───────────────────────────────────────────────────────────────────
+
+def random_policy(obs, num_actions: int, rng: np.random.Generator) -> int:
+    return int(rng.integers(0, num_actions))
+
+
+def forward_biased_policy(obs, num_actions: int, rng: np.random.Generator) -> int:
+    """
+    Weights: forward (2) = 50%, turn left (0) = 20%, turn right (1) = 20%,
+             remaining = 10% spread across actions 3-6.
+    This gives more purposeful movement than pure random.
+    """
+    weights = [0.20, 0.20, 0.50, 0.03, 0.03, 0.02, 0.02]
+    weights = weights[:num_actions]
+    weights = np.array(weights, dtype=np.float64)
+    weights /= weights.sum()
+    return int(rng.choice(num_actions, p=weights))
+
+
+POLICIES = {
+    "random":  random_policy,
+    "forward": forward_biased_policy,
+}
+
+
+# ── Collection loop ────────────────────────────────────────────────────────────
+
+def collect(
+    env_id: str,
+    num_episodes: int,
+    max_steps: int,
+    policy_name: str,
+    output_path: str,
+    seed: int,
+) -> None:
+    rng = np.random.default_rng(seed)
+    policy_fn = POLICIES[policy_name]
+
+    cfg = {
+        "env": {
+            "env_id":      env_id,
+            "instruction": None,   # use per-env default
+        },
+        "data": {"img_size": 64},   # collect at 64px; dataset resizes to 224 on load
+        "rl":  {"max_episode_steps": max_steps},
+    }
+    env = MiniGridEnv(cfg)
+    num_actions = MiniGridEnv.NUM_ACTIONS
+
+    print(f"Collecting {num_episodes} episodes from {env_id}")
+    print(f"  Policy:    {policy_name}")
+    print(f"  Max steps: {max_steps}")
+    print(f"  Output:    {output_path}")
+    print(f"  Seed:      {seed}")
+    print()
+
+    episodes = []
+    successes = 0
+
+    for ep_idx in range(num_episodes):
+        obs = env.reset()
+        instruction = obs["instruction"]
+
+        frames, actions, rewards = [], [], []
+        done = False
+        steps = 0
+
+        while not done and steps < max_steps:
+            frames.append(obs["frame"].copy())  # (H, W, 3)
+            action = policy_fn(obs, num_actions, rng)
+            obs, reward, done, info = env.step(action)
+            actions.append(action)
+            rewards.append(reward)
+            steps += 1
+
+        # Append the final frame so frames and actions are same length
+        frames.append(obs["frame"].copy())
+
+        ep_return = sum(rewards)
+        if ep_return > 0:
+            successes += 1
+
+        episode = {
+            "frames":      np.stack(frames[:-1], axis=0),   # (T, H, W, 3)
+            "instruction": instruction,
+            "actions":     np.array(actions, dtype=np.int64),
+            "rewards":     np.array(rewards, dtype=np.float32),
+        }
+        episodes.append(episode)
+
+        if (ep_idx + 1) % 50 == 0 or ep_idx == 0:
+            print(f"  [{ep_idx+1:4d}/{num_episodes}] "
+                  f"steps={steps:3d}  return={ep_return:.3f}  "
+                  f"success_rate={successes/(ep_idx+1)*100:.1f}%")
+
+    env.close()
+
+    save_episodes(episodes, output_path)
+    print(f"\nSaved {len(episodes)} episodes to {output_path}")
+    print(f"Success rate: {successes}/{num_episodes} = {successes/num_episodes*100:.1f}%")
+    total_steps = sum(len(ep["actions"]) for ep in episodes)
+    print(f"Total timesteps: {total_steps:,}")
+
+
+# ── CLI ────────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Collect MiniGrid demo trajectories")
+    p.add_argument("--env",      default="MiniGrid-Empty-5x5-v0",
+                   help="MiniGrid env id (default: MiniGrid-Empty-5x5-v0)")
+    p.add_argument("--episodes", type=int, default=200,
+                   help="Number of episodes to collect (default: 200)")
+    p.add_argument("--max-steps", type=int, default=100,
+                   help="Max steps per episode (default: 100)")
+    p.add_argument("--policy",   default="forward", choices=list(POLICIES),
+                   help="Collection policy: random | forward (default: forward)")
+    p.add_argument("--output",   default="data/minigrid_demos.pkl",
+                   help="Output .pkl path (default: data/minigrid_demos.pkl)")
+    p.add_argument("--seed",     type=int, default=0,
+                   help="Random seed (default: 0)")
+    return p.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    collect(
+        env_id=args.env,
+        num_episodes=args.episodes,
+        max_steps=args.max_steps,
+        policy_name=args.policy,
+        output_path=args.output,
+        seed=args.seed,
+    )

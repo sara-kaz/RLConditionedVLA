@@ -1,0 +1,75 @@
+# ── MiniGrid Configuration ─────────────────────────────────────────────────────
+# Drop-in replacement for config.yaml when using MiniGrid environments.
+# Key differences from the default config:
+#   - num_actions: 7  (MiniGrid's discrete action space)
+#   - env_id points at a real MiniGrid env
+#   - num_workers: 0  (avoids Windows multiprocessing issues)
+#   - episodes_path: data/minigrid_demos.pkl (collect with scripts/collect_minigrid_demos.py)
+
+model:
+  num_actions:    7           # MiniGrid has exactly 7 discrete actions
+  history_len:    4
+  num_vis_frames: 3
+  fusion_layers:  4           # smaller for faster iteration
+  fusion_heads:   8
+  d_model:        256
+  d_ff_scale:     4
+  dropout:        0.1
+  freeze_clip:    true
+
+vlla:
+  use_lang_feedback:      true
+  use_temporal_history:   true
+  use_reward_gate:        true
+  use_consequence_token:  true
+  alignment_loss_coef:    0.1
+  action_vocab:
+    0: "I turned left"
+    1: "I turned right"
+    2: "I moved forward"
+    3: "I picked up an object"
+    4: "I dropped an object"
+    5: "I toggled or interacted"
+    6: "I signalled done"
+
+data:
+  episodes_path:       data/minigrid_demos.pkl   # collect with scripts/collect_minigrid_demos.py
+  synthetic_episodes:  200
+  ep_len:              30
+  img_size:            224
+
+training:
+  device:          auto
+  epochs:          30
+  batch_size:      16
+  lr:              3e-4
+  lr_min:          1e-6
+  weight_decay:    1e-4
+  label_smoothing: 0.05
+  grad_clip:       1.0
+  val_fraction:    0.1
+  num_workers:     0           # 0 = main process only (safe on Windows)
+  save_every:      10
+  output_dir:      checkpoints/minigrid/
+
+rl:
+  epochs:              100
+  num_rollouts:        4
+  max_episode_steps:   100
+  gamma:               0.99
+  lr:                  1e-5
+  weight_decay:        1e-4
+  grad_clip:           1.0
+  entropy_coef:        0.01
+  vf_coef:             0.5
+  kl_coef:             0.1
+
+env:
+  env_id:               MiniGrid-Empty-5x5-v0
+  instruction:          "navigate to the green goal square"
+  domain_randomization: false
+  obs_noise_std:        0.0
+
+eval:
+  num_episodes:      20
+  success_threshold: 0.95     # MiniGrid success reward is ~1 - 0.9*(steps/max_steps)
