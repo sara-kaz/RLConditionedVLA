@@ -5,12 +5,24 @@ __pycache__/
 *.so
 .Python
 .env
+.venv/
+venv/
+ENV/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Packaging / build
 *.egg-info/
 .eggs/
 dist/
 build/
+pip-wheel-metadata/
 
-# IDE
+# IDE / editors
 .idea/
 .vscode/
 *.swp
@@ -20,19 +32,30 @@ build/
 .DS_Store
 Thumbs.db
 
-# LaTeX auxillary
+# LaTeX auxiliary
 *.aux
 *.log
 *.out
 *.toc
 *.bbl
 *.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
 
-# Model checkpoints & logs
-checkpoints/*.pt
-checkpoints/*.ckpt
+# Model checkpoints / logs
+checkpoints/
 logs/
+runs/
 
-# Data (episode pickle files can be large)
+# Data artifacts
 data/*.pkl
 data/*.pt
+data/*.npy
+data/*.npz
+
+# Images / generated docs artifacts (uncomment if you do not want generated images tracked)
+# docs/*.png
+
+# Jupyter
+*.ipynb_checkpoints
