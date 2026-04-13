@@ -115,9 +115,10 @@ class TrajectoryDataset(Dataset):
         # ── Language tokens ───────────────────────────────────────────────
         lang_tokens = self._token_cache[ep["instruction"]]  # (77,)
 
-        # ── Visual frames: last `num_vis_frames` frames up to t-1 ─────────
-        start_vis = max(0, t - self.num_vis_frames)
-        raw_frames = ep["frames"][start_vis:t]              # (<= num_vis_frames, H, W, 3)
+        # ── Visual frames: last `num_vis_frames` frames up to and including t ──
+        start_vis = max(0, t - self.num_vis_frames + 1)
+        raw_frames = ep["frames"][start_vis:t + 1]          # (<= num_vis_frames, H, W, 3)
+
         # Pad on the left if not enough history
         pad_needed = self.num_vis_frames - len(raw_frames)
         if pad_needed > 0:
@@ -132,6 +133,7 @@ class TrajectoryDataset(Dataset):
         start_h = max(0, t - self.history_len)
         hist_actions = ep["actions"][start_h:t].tolist()    # list of ints
         hist_rewards = ep["rewards"][start_h:t].tolist()    # list of floats
+
         # Left-pad with "no action" / 0 reward
         pad_h = self.history_len - len(hist_actions)
         hist_actions = [self.pad_action] * pad_h + hist_actions
