@@ -96,8 +96,8 @@ class TrajectoryDataset(Dataset):
         self.episodes = episodes
         for ep_i, ep in enumerate(episodes):
             T_ep = len(ep["actions"])
-            # Need at least 1 step to predict (t >= 1 so there's a target)
-            for t in range(1, T_ep):
+            # Include t = 0 so rollout initial conditions appear in training.
+            for t in range(T_ep):
                 self.index.append((ep_i, t))
 
         # Pre-tokenize all unique instructions
