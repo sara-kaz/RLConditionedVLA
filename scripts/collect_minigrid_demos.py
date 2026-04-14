@@ -113,11 +113,25 @@ def expert_noisy_policy(obs, num_actions: int, rng: np.random.Generator, env: Mi
     return expert_policy(obs, num_actions, rng, env)
 
 
+def expert_recovery_policy(obs, num_actions: int, rng: np.random.Generator, env: MiniGridEnv) -> int:
+    burst_steps = getattr(expert_recovery_policy, "_burst_steps", 0)
+    if burst_steps > 0:
+        expert_recovery_policy._burst_steps = burst_steps - 1
+        return int(rng.choice([0, 1, 2]))
+
+    if rng.random() < 0.10:
+        expert_recovery_policy._burst_steps = int(rng.integers(1, 4)) - 1
+        return int(rng.choice([0, 1, 2]))
+
+    return expert_policy(obs, num_actions, rng, env)
+
+
 POLICIES = {
     "random":  random_policy,
     "forward": forward_biased_policy,
     "expert":  expert_policy,
     "expert_noisy": expert_noisy_policy,
+    "expert_recovery": expert_recovery_policy,
 }
 
 
@@ -158,6 +172,8 @@ def collect(
     for ep_idx in range(num_episodes):
         obs = env.reset()
         instruction = obs["instruction"]
+        if policy_name == "expert_recovery":
+            expert_recovery_policy._burst_steps = 0
 
         frames, actions, rewards = [], [], []
         done = False
@@ -165,7 +181,7 @@ def collect(
 
         while not done and steps < max_steps:
             frames.append(obs["frame"].copy())  # (H, W, 3)
-            if policy_name in {"expert", "expert_noisy"}:
+            if policy_name in {"expert", "expert_noisy", "expert_recovery"}:
                 action = policy_fn(obs, num_actions, rng, env)
             else:
                 action = policy_fn(obs, num_actions, rng)
@@ -214,7 +230,7 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=100,
                    help="Max steps per episode (default: 100)")
     p.add_argument("--policy",   default="forward", choices=list(POLICIES),
-                   help="Collection policy: random | forward | expert | expert_noisy (default: forward)")
+                   help="Collection policy: random | forward | expert | expert_noisy | expert_recovery (default: forward)")
     p.add_argument("--output",   default="data/minigrid_demos.pkl",
                    help="Output .pkl path (default: data/minigrid_demos.pkl)")
     p.add_argument("--seed",     type=int, default=0,
