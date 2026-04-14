@@ -144,6 +144,7 @@ def collect(
     policy_name: str,
     output_path: str,
     seed: int,
+    save_every: int,
 ) -> None:
     rng = np.random.default_rng(seed)
     policy_fn = POLICIES[policy_name]
@@ -169,46 +170,56 @@ def collect(
     episodes = []
     successes = 0
 
-    for ep_idx in range(num_episodes):
-        obs = env.reset()
-        instruction = obs["instruction"]
-        if policy_name == "expert_recovery":
-            expert_recovery_policy._burst_steps = 0
+    try:
+        for ep_idx in range(num_episodes):
+            obs = env.reset()
+            instruction = obs["instruction"]
+            if policy_name == "expert_recovery":
+                expert_recovery_policy._burst_steps = 0
 
-        frames, actions, rewards = [], [], []
-        done = False
-        steps = 0
+            frames, actions, rewards = [], [], []
+            done = False
+            steps = 0
 
-        while not done and steps < max_steps:
-            frames.append(obs["frame"].copy())  # (H, W, 3)
-            if policy_name in {"expert", "expert_noisy", "expert_recovery"}:
-                action = policy_fn(obs, num_actions, rng, env)
-            else:
-                action = policy_fn(obs, num_actions, rng)
-            obs, reward, done, info = env.step(action)
-            actions.append(action)
-            rewards.append(reward)
-            steps += 1
+            while not done and steps < max_steps:
+                frames.append(obs["frame"].copy())  # (H, W, 3)
+                if policy_name in {"expert", "expert_noisy", "expert_recovery"}:
+                    action = policy_fn(obs, num_actions, rng, env)
+                else:
+                    action = policy_fn(obs, num_actions, rng)
+                obs, reward, done, info = env.step(action)
+                actions.append(action)
+                rewards.append(reward)
+                steps += 1
 
-        # Append the final frame so frames and actions are same length
-        frames.append(obs["frame"].copy())
+            # Append the final frame so frames and actions are same length
+            frames.append(obs["frame"].copy())
 
-        ep_return = sum(rewards)
-        if ep_return > 0:
-            successes += 1
+            ep_return = sum(rewards)
+            if ep_return > 0:
+                successes += 1
 
-        episode = {
-            "frames":      np.stack(frames[:-1], axis=0),   # (T, H, W, 3)
-            "instruction": instruction,
-            "actions":     np.array(actions, dtype=np.int64),
-            "rewards":     np.array(rewards, dtype=np.float32),
-        }
-        episodes.append(episode)
+            episode = {
+                "frames":      np.stack(frames[:-1], axis=0),   # (T, H, W, 3)
+                "instruction": instruction,
+                "actions":     np.array(actions, dtype=np.int64),
+                "rewards":     np.array(rewards, dtype=np.float32),
+            }
+            episodes.append(episode)
 
-        if (ep_idx + 1) % 50 == 0 or ep_idx == 0:
-            print(f"  [{ep_idx+1:4d}/{num_episodes}] "
-                  f"steps={steps:3d}  return={ep_return:.3f}  "
-                  f"success_rate={successes/(ep_idx+1)*100:.1f}%")
+            if (ep_idx + 1) % 50 == 0 or ep_idx == 0:
+                print(f"  [{ep_idx+1:4d}/{num_episodes}] "
+                      f"steps={steps:3d}  return={ep_return:.3f}  "
+                      f"success_rate={successes/(ep_idx+1)*100:.1f}%")
+
+            if save_every > 0 and (ep_idx + 1) % save_every == 0:
+                save_episodes(episodes, output_path)
+                print(f"  [save] partial save: {len(episodes)} episodes -> {output_path}")
+    except KeyboardInterrupt:
+        save_episodes(episodes, output_path)
+        print(f"\n[interrupt] KeyboardInterrupt caught. Saved {len(episodes)} episodes to {output_path}")
+        env.close()
+        return
 
     env.close()
 
@@ -235,6 +246,8 @@ def parse_args():
                    help="Output .pkl path (default: data/minigrid_demos.pkl)")
     p.add_argument("--seed",     type=int, default=0,
                    help="Random seed (default: 0)")
+    p.add_argument("--save-every", type=int, default=25,
+                   help="Save partial progress every N completed episodes (default: 25)")
     return p.parse_args()
 
 
@@ -247,4 +260,5 @@ if __name__ == "__main__":
         policy_name=args.policy,
         output_path=args.output,
         seed=args.seed,
+        save_every=args.save_every,
     )
