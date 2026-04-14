@@ -23,7 +23,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 from models.vlla_model import VLLAModel
 from data.trajectory_dataset import TrajectoryDataset, load_episodes, make_random_episodes
@@ -61,19 +61,37 @@ def build_dataloaders(cfg: dict, device: str):
             num_actions=cfg["model"]["num_actions"],
         )
 
-    dataset = TrajectoryDataset(
-        episodes,
+    val_frac = cfg["training"].get("val_fraction", 0.1)
+    split_seed = cfg["training"].get("seed", 0)
+    num_episodes = len(episodes)
+    n_val = max(1, int(num_episodes * val_frac))
+    if num_episodes > 1:
+        n_val = min(n_val, num_episodes - 1)
+    else:
+        n_val = num_episodes
+    generator = torch.Generator().manual_seed(split_seed)
+    perm = torch.randperm(num_episodes, generator=generator).tolist()
+    val_indices = set(perm[:n_val])
+    train_episodes = [ep for idx, ep in enumerate(episodes) if idx not in val_indices]
+    val_episodes = [ep for idx, ep in enumerate(episodes) if idx in val_indices]
+    print(f"[data] train episodes: {len(train_episodes)} | val episodes: {len(val_episodes)}")
+
+    train_ds = TrajectoryDataset(
+        train_episodes,
         history_len=cfg["model"]["history_len"],
         num_vis_frames=cfg["model"]["num_vis_frames"],
         num_actions=cfg["model"]["num_actions"],
         img_size=cfg["data"].get("img_size", 224),
         device=device,
     )
-
-    val_frac = cfg["training"].get("val_fraction", 0.1)
-    n_val    = max(1, int(len(dataset) * val_frac))
-    n_train  = len(dataset) - n_val
-    train_ds, val_ds = random_split(dataset, [n_train, n_val])
+    val_ds = TrajectoryDataset(
+        val_episodes,
+        history_len=cfg["model"]["history_len"],
+        num_vis_frames=cfg["model"]["num_vis_frames"],
+        num_actions=cfg["model"]["num_actions"],
+        img_size=cfg["data"].get("img_size", 224),
+        device=device,
+    )
 
     kw = dict(
         batch_size=cfg["training"]["batch_size"],
