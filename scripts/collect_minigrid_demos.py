@@ -107,10 +107,17 @@ def expert_policy(obs, num_actions: int, rng: np.random.Generator, env: MiniGrid
     return 1 if turn_right_steps < turn_left_steps else 0
 
 
+def expert_noisy_policy(obs, num_actions: int, rng: np.random.Generator, env: MiniGridEnv) -> int:
+    if rng.random() < 0.10:
+        return int(rng.choice([0, 1, 2]))
+    return expert_policy(obs, num_actions, rng, env)
+
+
 POLICIES = {
     "random":  random_policy,
     "forward": forward_biased_policy,
     "expert":  expert_policy,
+    "expert_noisy": expert_noisy_policy,
 }
 
 
@@ -158,7 +165,7 @@ def collect(
 
         while not done and steps < max_steps:
             frames.append(obs["frame"].copy())  # (H, W, 3)
-            if policy_name == "expert":
+            if policy_name in {"expert", "expert_noisy"}:
                 action = policy_fn(obs, num_actions, rng, env)
             else:
                 action = policy_fn(obs, num_actions, rng)
@@ -207,7 +214,7 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=100,
                    help="Max steps per episode (default: 100)")
     p.add_argument("--policy",   default="forward", choices=list(POLICIES),
-                   help="Collection policy: random | forward | expert (default: forward)")
+                   help="Collection policy: random | forward | expert | expert_noisy (default: forward)")
     p.add_argument("--output",   default="data/minigrid_demos.pkl",
                    help="Output .pkl path (default: data/minigrid_demos.pkl)")
     p.add_argument("--seed",     type=int, default=0,
