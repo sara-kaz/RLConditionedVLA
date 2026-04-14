@@ -62,9 +62,55 @@ def forward_biased_policy(obs, num_actions: int, rng: np.random.Generator) -> in
     return int(rng.choice(num_actions, p=weights))
 
 
+def expert_policy(obs, num_actions: int, rng: np.random.Generator, env: MiniGridEnv) -> int:
+    """
+    Simple state-conditioned expert for navigation in MiniGrid-Empty-5x5-v0.
+    Uses the current agent pose and goal location to choose among:
+      0 = turn left
+      1 = turn right
+      2 = move forward
+    """
+    base_env = env._env.unwrapped
+    agent_x, agent_y = base_env.agent_pos
+    agent_dir = base_env.agent_dir
+
+    goal_pos = None
+    for x in range(base_env.grid.width):
+        for y in range(base_env.grid.height):
+            cell = base_env.grid.get(x, y)
+            if cell is not None and getattr(cell, "type", None) == "goal":
+                goal_pos = (x, y)
+                break
+        if goal_pos is not None:
+            break
+
+    if goal_pos is None:
+        return 2 if num_actions > 2 else 0
+
+    goal_x, goal_y = goal_pos
+    dx = goal_x - agent_x
+    dy = goal_y - agent_y
+
+    if abs(dx) >= abs(dy):
+        desired_dir = 0 if dx > 0 else 2 if dx < 0 else (1 if dy > 0 else 3)
+    else:
+        desired_dir = 1 if dy > 0 else 3
+
+    if (agent_x, agent_y) == goal_pos:
+        return 2 if num_actions > 2 else 0
+
+    if agent_dir == desired_dir:
+        return 2
+
+    turn_right_steps = (desired_dir - agent_dir) % 4
+    turn_left_steps = (agent_dir - desired_dir) % 4
+    return 1 if turn_right_steps < turn_left_steps else 0
+
+
 POLICIES = {
     "random":  random_policy,
     "forward": forward_biased_policy,
+    "expert":  expert_policy,
 }
 
 
@@ -112,7 +158,10 @@ def collect(
 
         while not done and steps < max_steps:
             frames.append(obs["frame"].copy())  # (H, W, 3)
-            action = policy_fn(obs, num_actions, rng)
+            if policy_name == "expert":
+                action = policy_fn(obs, num_actions, rng, env)
+            else:
+                action = policy_fn(obs, num_actions, rng)
             obs, reward, done, info = env.step(action)
             actions.append(action)
             rewards.append(reward)
@@ -158,7 +207,7 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=100,
                    help="Max steps per episode (default: 100)")
     p.add_argument("--policy",   default="forward", choices=list(POLICIES),
-                   help="Collection policy: random | forward (default: forward)")
+                   help="Collection policy: random | forward | expert (default: forward)")
     p.add_argument("--output",   default="data/minigrid_demos.pkl",
                    help="Output .pkl path (default: data/minigrid_demos.pkl)")
     p.add_argument("--seed",     type=int, default=0,
