@@ -24,6 +24,7 @@ import torch.nn.functional as F
 import clip
 
 from models.vla_model import RLConditionedVLA
+from envs.minigrid_env import MiniGridEnv
 from envs.sim_env import SimEnv
 
 
@@ -55,7 +56,8 @@ def evaluate(cfg: dict, checkpoint_path: str, num_episodes: int = 20, determinis
                      std= [0.26862954, 0.26130258, 0.27577711]),
     ])
 
-    env            = SimEnv(cfg)
+    env_id = cfg["env"].get("env_id", "")
+    env = MiniGridEnv(cfg) if env_id.startswith("MiniGrid-") else SimEnv(cfg)
     history_len    = cfg["model"]["history_len"]
     num_vis_frames = cfg["model"]["num_vis_frames"]
     num_actions    = cfg["model"]["num_actions"]
