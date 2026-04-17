@@ -1,4 +1,4 @@
-# ── VLLA-Robot-Learning Configuration ─────────────────────────────────────────
+# ── VERA-Robot-Learning Configuration ─────────────────────────────────────────
 # Vision-Language-Language-Action model with dual semantic+numerical feedback.
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -12,9 +12,11 @@ model:
   d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
   dropout:        0.1
   freeze_clip:    true        # keep CLIP backbone frozen (recommended)
+  action_dim:     4           # continuous action vector dimension — MUST match dataset
+                              # MetaWorld=4 [Δx,Δy,Δz,gripper]  CALVIN=7  Language-Table=2
 
-# ── VLLA-Specific Settings ─────────────────────────────────────────────────────
-vlla:
+# ── VERA-Specific Settings ─────────────────────────────────────────────────────
+vera:
   # Ablation flags: set any to false to run ablation experiments
   use_lang_feedback:      true    # Stream 3: action language feedback [core novelty]
   use_temporal_history:   true    # TemporalHistoryTransformer over numerical history
@@ -29,16 +31,34 @@ vlla:
   # Set to 0.0 to ablate all alignment losses.
   alignment_loss_coef:    0.1
 
+  # Continuous action regression loss coefficient (λ_reg)
+  # MSE between predicted action_vec and expert's executed action vector.
+  # Only active when dataset supplies action_vectors (CALVIN, Language-Table, MetaWorld).
+  # Set to 0.0 to ablate the regression head (discrete-only baseline).
+  regression_loss_coef:   0.5
+
   # Custom action vocabulary (null = use built-in generic descriptions)
-  # Override per environment, e.g.:
-  #   action_vocab:
-  #     0: "I moved the robot arm to the left"
-  #     1: "I opened the gripper"
+  # 8-bin angle-quantised vocabulary for Language-Table [Δx, Δy] actions:
+  #   bins correspond to arctan2(Δy,Δx) quantised into 8 equal sectors (π/4 each)
+  #   Uncomment the block below when training on Language-Table.
   action_vocab: null
+  # action_vocab:                                   # ← Language-Table 2-DoF vocabulary
+  #   0: "I pushed the object to the right"         # angle ≈ 0°
+  #   1: "I pushed the object up and to the right"  # angle ≈ 45°
+  #   2: "I pushed the object upward"               # angle ≈ 90°
+  #   3: "I pushed the object up and to the left"   # angle ≈ 135°
+  #   4: "I pushed the object to the left"          # angle ≈ 180°
+  #   5: "I pushed the object down and to the left" # angle ≈ -135°
+  #   6: "I pushed the object downward"             # angle ≈ -90°
+  #   7: "I pushed the object down and to the right"# angle ≈ -45°
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 data:
-  episodes_path:       null     # path to .pkl file; null = use synthetic data
+  episodes_path:       null     # path to dataset root or .pkl file; null = synthetic
+  dataset_type:        pkl      # "pkl" | "language_table" | "calvin"
+                                # language_table: expects root/episode_XXX/steps.pkl dirs
+                                # calvin:         expects root/training/*.npz + lang_annotations/
+  calvin_split:        training # only used when dataset_type=calvin
   synthetic_episodes:  200      # episodes to generate when no real data provided
   ep_len:              30       # average episode length for synthetic data
   img_size:            224      # resize all frames to this square size
@@ -84,29 +104,65 @@ eval:
   success_threshold: 1.0         # min total return to count as success
 
 # ── Ablation Study Presets ─────────────────────────────────────────────────────
-# To run an ablation, override the vlla section from the command line or
+# To run an ablation, override the vera section from the command line or
 # create a separate config file that inherits these defaults.
 #
 # Ablation A — base VLA (no language feedback):
-#   vlla.use_lang_feedback: false
+#   vera.use_lang_feedback: false
 #
 # Ablation B — no temporal history transformer:
-#   vlla.use_temporal_history: false
+#   vera.use_temporal_history: false
 #
 # Ablation C — no reward gate:
-#   vlla.use_reward_gate: false
+#   vera.use_reward_gate: false
 #
 # Ablation D — no contrastive alignment loss:
-#   vlla.alignment_loss_coef: 0.0
+#   vera.alignment_loss_coef: 0.0
 #
 # Ablation E — no language feedback AND no temporal history (minimal model):
-#   vlla.use_lang_feedback: false
-#   vlla.use_temporal_history: false
+#   vera.use_lang_feedback: false
+#   vera.use_temporal_history: false
 #
 # Ablation F — action token only, no consequence token (original Stream 3):
-#   vlla.use_consequence_token: false
+#   vera.use_consequence_token: false
 #
 # Ablation G — consequence token only, no action token (isolate outcome signal):
-#   vlla.use_lang_feedback: true
-#   vlla.use_consequence_token: true
+#   vera.use_lang_feedback: true
+#   vera.use_consequence_token: true
 #   action_vocab: null   # action token still present; consequence ablated separately above
+
+# ── Dataset Presets ─────────────────────────────────────────────────────────────
+# To train on Language-Table, override ONLY these keys (everything else stays default):
+#
+#   data:
+#     episodes_path:    /path/to/language_table_root   # dir with episode_XXX/ subdirs
+#     dataset_type:     language_table
+#     img_size:         224
+#
+#   model:
+#     num_actions:      8       # 8 directional bins (angle-quantised)
+#     action_dim:       2       # [Δx, Δy] planar end-effector delta
+#
+#   vera:
+#     action_vocab:
+#       0: "I pushed the object to the right"
+#       1: "I pushed the object up and to the right"
+#       2: "I pushed the object upward"
+#       3: "I pushed the object up and to the left"
+#       4: "I pushed the object to the left"
+#       5: "I pushed the object down and to the left"
+#       6: "I pushed the object downward"
+#       7: "I pushed the object down and to the right"
+#
+# To train on CALVIN, override:
+#   data:
+#     episodes_path:    /path/to/calvin_root   # dir with training/ and validation/ subdirs
+#     dataset_type:     calvin
+#     calvin_split:     training
+#
+#   model:
+#     num_actions:      8       # 8 dominant-axis bins (xyz roll pitch yaw + gripper open/close)
+#     action_dim:       7       # full 7-DoF [x,y,z,roll,pitch,yaw,gripper]
+#
+# Run command (either dataset):
+#   python -m training.sft_trainer_vera --config configs/config.yaml

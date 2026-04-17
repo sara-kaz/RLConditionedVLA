@@ -265,7 +265,11 @@ class MetaWorldEnv(BaseEnv):
         dist_delta = float(curr_dist - self._prev_dist)   # negative = closer
         self._prev_dist = curr_dist
 
-        info["dist_delta"] = dist_delta
+        # Expose the executed codebook vector so the RL rollout collector can
+        # feed it into Stream 4 (ActionRewardHistoryEncoder) at the next step.
+        # Shape: (action_dim,) = (4,) for MetaWorld [Δx, Δy, Δz, gripper].
+        info["dist_delta"]    = dist_delta
+        info["action_vector"] = cont_action.copy()   # numpy array (4,)
         obs = {"frame": frame, "instruction": self._instruction}
         return obs, float(reward), bool(done), info
 
