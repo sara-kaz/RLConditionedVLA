@@ -203,96 +203,103 @@ def load_calvin(root: str, split: str = "training") -> List[Dict]:
         print(f"[CALVIN] No .npz files found in {root}. Check dataset path.")
         return episodes
 
-    # Group files into episodes using language annotation boundaries if available
-    if lang_ann is not None:
-        indx      = lang_ann["info"]["indx"]       # [(start, end), ...]
-        tasks     = lang_ann["language"]["task"]   # [str, ...]
+    # Build index of available frame numbers for fast lookup
+    available = {int(f.stem.split("_")[1]): f for f in episode_files}
 
-        for (start, end), task_str in zip(indx, tasks):
-            ep_files = episode_files[start:end + 1]
-            if len(ep_files) < 2:
-                continue
+    def _discretise(rel_action):
+        """14-bin direction-aware discretisation of 7-DoF CALVIN action."""
+        if rel_action[6] > 0.5:
+            return 12   # gripper open
+        elif rel_action[6] < -0.5:
+            return 13   # gripper close
+        else:
+            dom = int(np.argmax(np.abs(rel_action[:6])))
+            return dom * 2 + (0 if rel_action[dom] >= 0 else 1)
 
-            frames      = []
-            actions_idx = []
-            rewards     = []
-            action_vecs = []
-
-            for npz_path in ep_files:
-                data = np.load(npz_path, allow_pickle=True)
-
-                # Use static camera RGB
-                frame = data.get("rgb_static", None)
-                if frame is None:
-                    continue
-                frames.append(np.asarray(frame, dtype=np.uint8))
-
-                # 7-DoF relative action vector
-                rel_action = data.get("rel_actions", np.zeros(7, dtype=np.float32))
-                rel_action = np.asarray(rel_action, dtype=np.float32).flatten()[:7]
-
-                # Discretise into 14 direction-aware bins:
-                #   0-11 : dominant translational/rotational axis × direction
-                #          axis 0=x, 1=y, 2=z, 3=roll, 4=pitch, 5=yaw
-                #          even = positive, odd = negative
-                #   12   : gripper open  (rel_action[6] > 0.5)
-                #   13   : gripper close (rel_action[6] < -0.5)
-                if rel_action[6] > 0.5:
-                    action_idx = 12   # gripper open
-                elif rel_action[6] < -0.5:
-                    action_idx = 13   # gripper close
-                else:
-                    dom = int(np.argmax(np.abs(rel_action[:6])))
-                    action_idx = dom * 2 + (0 if rel_action[dom] >= 0 else 1)
-
-                actions_idx.append(action_idx)
-                rewards.append(float(data.get("done", 0)))   # reward = 1 on success
-                action_vecs.append(rel_action)
-
-            if len(frames) < 2:
-                continue
-
-            episodes.append({
-                "frames":         np.stack(frames),
-                "instruction":    task_str,
-                "actions":        np.array(actions_idx, dtype=np.int64),
-                "rewards":        np.array(rewards, dtype=np.float32),
-                "action_vectors": np.stack(action_vecs).astype(np.float32),
-            })
-    else:
-        # No annotations: treat each file as a single-step episode (limited)
-        print("[CALVIN] No lang_annotations found — loading raw episodes without instructions.")
+    def _load_episode(frame_indices, task_str):
+        """Load one annotated episode from a list of absolute frame indices."""
         frames, actions_idx, rewards, action_vecs = [], [], [], []
-        for npz_path in episode_files:
+        for idx in frame_indices:
+            if idx not in available:
+                return None           # frame not downloaded — skip episode
+            data  = np.load(available[idx], allow_pickle=True)
+            frame = data.get("rgb_static", None)
+            if frame is None:
+                return None
+            rel_action = np.asarray(
+                data.get("rel_actions", np.zeros(7, dtype=np.float32)),
+                dtype=np.float32,
+            ).flatten()[:7]
+            frames.append(np.asarray(frame, dtype=np.uint8))
+            actions_idx.append(_discretise(rel_action))
+            rewards.append(float(data.get("done", 0)))
+            action_vecs.append(rel_action)
+        if len(frames) < 2:
+            return None
+        return {
+            "frames":         np.stack(frames),
+            "instruction":    task_str,
+            "actions":        np.array(actions_idx, dtype=np.int64),
+            "rewards":        np.array(rewards,     dtype=np.float32),
+            "action_vectors": np.stack(action_vecs).astype(np.float32),
+        }
+
+    # ── Resolve episode boundaries from annotation sources ────────────────────
+
+    ep_se_path = root / "ep_start_end_ids.npy"
+
+    if lang_ann is not None:
+        # Primary: language annotations with task strings
+        indx  = lang_ann["info"]["indx"]       # [(start_frame, end_frame), ...]
+        tasks = lang_ann["language"]["task"]   # [str, ...]
+        print(f"[CALVIN] Using lang_annotations ({len(indx)} episodes)")
+
+    elif ep_se_path.exists():
+        # Fallback: ep_start_end_ids.npy — absolute frame index pairs, no text
+        ep_se = np.load(ep_se_path)            # (N, 2) int array
+        indx  = [(int(s), int(e)) for s, e in ep_se]
+        tasks = ["complete the manipulation task"] * len(indx)
+        print(f"[CALVIN] No lang_annotations — using ep_start_end_ids.npy "
+              f"({len(indx)} episodes, generic instruction)")
+
+    else:
+        indx, tasks = [], []
+
+    # ── Load annotated episodes ────────────────────────────────────────────────
+    if indx:
+        skipped = 0
+        for (start, end), task_str in zip(indx, tasks):
+            ep = _load_episode(list(range(start, end + 1)), task_str)
+            if ep is None:
+                skipped += 1
+            else:
+                episodes.append(ep)
+        if skipped:
+            print(f"[CALVIN] Skipped {skipped} episodes (frames not downloaded)")
+
+    # ── Last-resort fallback: no annotation files at all ─────────────────────
+    if not indx and not episodes:
+        print("[CALVIN] No annotation files found — treating each NPZ as a 1-step episode.")
+        for frame_idx, npz_path in sorted(available.items()):
             data  = np.load(npz_path, allow_pickle=True)
             frame = data.get("rgb_static", None)
             if frame is None:
                 continue
             rel_action = np.asarray(
-                data.get("rel_actions", np.zeros(7, dtype=np.float32)), dtype=np.float32
+                data.get("rel_actions", np.zeros(7, dtype=np.float32)),
+                dtype=np.float32,
             ).flatten()[:7]
-            if rel_action[6] > 0.5:
-                action_idx = 12
-            elif rel_action[6] < -0.5:
-                action_idx = 13
-            else:
-                dom = int(np.argmax(np.abs(rel_action[:6])))
-                action_idx = dom * 2 + (0 if rel_action[dom] >= 0 else 1)
-            frames.append(np.asarray(frame, dtype=np.uint8))
-            actions_idx.append(action_idx)
-            rewards.append(float(data.get("done", 0)))
-            action_vecs.append(rel_action)
-
-        if len(frames) >= 2:
             episodes.append({
-                "frames":         np.stack(frames),
+                "frames":         np.stack([np.asarray(frame, dtype=np.uint8)] * 2),
                 "instruction":    "complete the manipulation task",
-                "actions":        np.array(actions_idx, dtype=np.int64),
-                "rewards":        np.array(rewards, dtype=np.float32),
-                "action_vectors": np.stack(action_vecs).astype(np.float32),
+                "actions":        np.array([_discretise(rel_action), _discretise(rel_action)],
+                                           dtype=np.int64),
+                "rewards":        np.array([float(data.get("done", 0))] * 2,
+                                           dtype=np.float32),
+                "action_vectors": np.stack([rel_action] * 2).astype(np.float32),
             })
 
-    print(f"[CALVIN] Loaded {len(episodes)} annotated episodes from {root}")
+    print(f"[CALVIN] Loaded {len(episodes)} episodes from {root}")
     return episodes
 
 
