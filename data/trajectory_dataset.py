@@ -231,13 +231,19 @@ def load_calvin(root: str, split: str = "training") -> List[Dict]:
                 rel_action = data.get("rel_actions", np.zeros(7, dtype=np.float32))
                 rel_action = np.asarray(rel_action, dtype=np.float32).flatten()[:7]
 
-                # Discretise: use dominant axis for action index
-                action_idx = int(np.argmax(np.abs(rel_action[:6])))
-                # gripper open/close → extra indices
+                # Discretise into 14 direction-aware bins:
+                #   0-11 : dominant translational/rotational axis × direction
+                #          axis 0=x, 1=y, 2=z, 3=roll, 4=pitch, 5=yaw
+                #          even = positive, odd = negative
+                #   12   : gripper open  (rel_action[6] > 0.5)
+                #   13   : gripper close (rel_action[6] < -0.5)
                 if rel_action[6] > 0.5:
-                    action_idx = 6
+                    action_idx = 12   # gripper open
                 elif rel_action[6] < -0.5:
-                    action_idx = 7
+                    action_idx = 13   # gripper close
+                else:
+                    dom = int(np.argmax(np.abs(rel_action[:6])))
+                    action_idx = dom * 2 + (0 if rel_action[dom] >= 0 else 1)
 
                 actions_idx.append(action_idx)
                 rewards.append(float(data.get("done", 0)))   # reward = 1 on success
@@ -265,7 +271,13 @@ def load_calvin(root: str, split: str = "training") -> List[Dict]:
             rel_action = np.asarray(
                 data.get("rel_actions", np.zeros(7, dtype=np.float32)), dtype=np.float32
             ).flatten()[:7]
-            action_idx = int(np.argmax(np.abs(rel_action[:6])))
+            if rel_action[6] > 0.5:
+                action_idx = 12
+            elif rel_action[6] < -0.5:
+                action_idx = 13
+            else:
+                dom = int(np.argmax(np.abs(rel_action[:6])))
+                action_idx = dom * 2 + (0 if rel_action[dom] >= 0 else 1)
             frames.append(np.asarray(frame, dtype=np.uint8))
             actions_idx.append(action_idx)
             rewards.append(float(data.get("done", 0)))

@@ -288,6 +288,8 @@ def train(cfg: dict):
     out_dir     = Path(cfg["training"]["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    patience         = cfg["training"].get("early_stopping_patience", 10)
+    patience_counter = 0
     log, best_val_acc = [], 0.0
 
     for epoch in range(1, total_epochs + 1):
@@ -330,9 +332,10 @@ def train(cfg: dict):
               f"val loss {row['val_loss']:.4f} acc {row['val_acc']:.3f} | "
               f"lr {row['lr']:.2e} | {elapsed:.1f}s")
 
-        # Save best checkpoint
+        # Save best checkpoint + early stopping
         if val_m["accuracy"] > best_val_acc:
             best_val_acc = val_m["accuracy"]
+            patience_counter = 0
             torch.save({
                 "epoch":       epoch,
                 "model_state": model.state_dict(),
@@ -340,6 +343,13 @@ def train(cfg: dict):
                 "cfg":         cfg,
             }, out_dir / "best_sft_vera.pt")
             print(f"  ✓ best checkpoint saved (val_acc={best_val_acc:.3f})")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"\n[sft_vera] Early stop at epoch {epoch} "
+                      f"(no improvement for {patience} epochs). "
+                      f"Best val acc: {best_val_acc:.3f}")
+                break
 
         # Periodic snapshot
         if epoch % cfg["training"].get("save_every", 10) == 0:
@@ -353,6 +363,10 @@ def train(cfg: dict):
         json.dump(log, f, indent=2)
 
     print(f"\n[sft_vera] Done. Best val acc: {best_val_acc:.3f}")
+
+
+# Alias used by run_ablations.py and run_calvin_ablations.py
+sft_train = train
 
 
 if __name__ == "__main__":
