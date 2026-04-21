@@ -222,7 +222,10 @@ def load_calvin(root: str, split: str = "training") -> List[Dict]:
         for idx in frame_indices:
             if idx not in available:
                 return None           # frame not downloaded — skip episode
-            data  = np.load(available[idx], allow_pickle=True)
+            try:
+                data = np.load(available[idx], allow_pickle=True)
+            except Exception:
+                return None           # corrupted file — skip episode
             frame = data.get("rgb_static", None)
             if frame is None:
                 return None
