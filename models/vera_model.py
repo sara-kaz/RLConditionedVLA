@@ -446,7 +446,11 @@ class ActionLanguageFeedbackEncoder(nn.Module):
         self.num_actions    = num_actions
         self.use_reward_gate = use_reward_gate
 
-        vocab     = action_vocab or build_action_vocabulary(num_actions)
+        vocab = action_vocab or build_action_vocabulary(num_actions)
+        # Index num_actions is the padding/"no previous action" token used when
+        # history is empty at the start of an episode. Auto-add if missing.
+        if num_actions not in vocab:
+            vocab = {**vocab, num_actions: 'no previous action taken'}
         all_texts = [vocab[i] for i in range(num_actions + 1)]
         self.register_buffer("action_tokens", clip.tokenize(all_texts))
 
