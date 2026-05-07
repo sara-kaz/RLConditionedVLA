@@ -818,6 +818,7 @@ class VERAModel(nn.Module):
         d_ff_scale:           int   = 4,
         dropout:              float = 0.1,
         freeze_clip:          bool  = True,
+        unfreeze_clip_vision: bool  = False,   # fine-tune ViT vision encoder (keep text frozen)
         use_lang_feedback:    bool  = True,
         use_temporal_history: bool  = True,
         use_reward_gate:      bool  = True,
@@ -844,6 +845,15 @@ class VERAModel(nn.Module):
         if freeze_clip:
             for p in self.clip_model.parameters():
                 p.requires_grad = False
+
+        # Optionally re-enable CLIP vision encoder for task-specific fine-tuning.
+        # Keeps text encoder frozen (language priors are preserved), only allows
+        # the ViT image encoder to adapt to the target visual domain (e.g. the
+        # overhead synthetic images of Language-Table / CALVIN).
+        # Use a small LR (e.g. 1e-5) for these params via the trainer param groups.
+        if unfreeze_clip_vision:
+            for p in self.clip_model.visual.parameters():
+                p.requires_grad = True
 
         # ── Projections: CLIP → d_model ───────────────────────────────────────
         # Using RMSNorm in place of LayerNorm for consistency with LLaMA backbone

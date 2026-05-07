@@ -115,6 +115,7 @@ def build_model(cfg: dict) -> VERAModel:
         d_ff_scale=cfg["model"].get("d_ff_scale", 4),
         dropout=cfg["model"].get("dropout", 0.1),
         freeze_clip=cfg["model"].get("freeze_clip", True),
+        unfreeze_clip_vision=cfg["model"].get("unfreeze_clip_vision", False),
         use_lang_feedback=vera_cfg.get("use_lang_feedback", True),
         use_temporal_history=vera_cfg.get("use_temporal_history", True),
         use_reward_gate=vera_cfg.get("use_reward_gate", True),
@@ -263,12 +264,34 @@ def train(cfg: dict):
     weight_decay = float(t_cfg.get("weight_decay", 1e-4))
     total_epochs = int(t_cfg["epochs"])
 
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=lr,
-        weight_decay=weight_decay,
-        betas=(0.9, 0.98),      # slightly higher β₂ for transformer training
-    )
+    # ── Param-group-aware optimizer ──────────────────────────────────────────
+    # When CLIP vision is unfrozen (unfreeze_clip_vision=True), use a much
+    # smaller LR for those params to avoid destroying pretrained features.
+    # clip_vision_lr defaults to 5% of the main LR if not specified.
+    clip_vis_params = [p for p in model.clip_model.visual.parameters()
+                       if p.requires_grad]
+    if clip_vis_params:
+        clip_vision_lr  = float(t_cfg.get("clip_vision_lr", lr * 0.05))
+        clip_vis_ids    = {id(p) for p in clip_vis_params}
+        non_clip_params = [p for p in model.parameters()
+                           if p.requires_grad and id(p) not in clip_vis_ids]
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": non_clip_params, "lr": lr,            "weight_decay": weight_decay},
+                {"params": clip_vis_params,  "lr": clip_vision_lr, "weight_decay": weight_decay * 0.1},
+            ],
+            betas=(0.9, 0.98),
+        )
+        print(f"[opt] 2 param groups — backbone {len(non_clip_params)} params "
+              f"lr={lr:.2e}, clip-vision {len(clip_vis_params)} params "
+              f"lr={clip_vision_lr:.2e}")
+    else:
+        optimizer = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=lr,
+            weight_decay=weight_decay,
+            betas=(0.9, 0.98),      # slightly higher β₂ for transformer training
+        )
 
     # Warmup + cosine annealing: warmup for 5% of total steps, then cosine decay
     warmup_epochs = max(1, int(total_epochs * 0.05))

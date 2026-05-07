@@ -12,6 +12,10 @@ model:
   d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
   dropout:        0.1
   freeze_clip:    true        # keep CLIP backbone frozen (recommended)
+  unfreeze_clip_vision: false # fine-tune ViT image encoder (text stays frozen)
+                              # Set true for Language-Table / CALVIN where CLIP
+                              # pretrained vision is out-of-domain. Pair with
+                              # training.clip_vision_lr (default: 5% of main lr).
   action_dim:     4           # continuous action vector dimension — MUST match dataset
                               # MetaWorld=4 [Δx,Δy,Δz,gripper]  CALVIN=7  Language-Table=2
 
@@ -77,6 +81,8 @@ training:
   num_workers:     2
   save_every:      10
   output_dir:      checkpoints/
+  clip_vision_lr:  1e-5          # LR for CLIP vision when unfreeze_clip_vision=true
+                                 # (much smaller than main lr to avoid destroying priors)
 
 # ── Online RL Fine-Tuning ──────────────────────────────────────────────────────
 rl:
