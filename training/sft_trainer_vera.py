@@ -256,15 +256,21 @@ def train(cfg: dict):
     model = build_model(cfg).to(device)
     print(f"[model] {model.param_summary()}")
 
+    # Cast to float/int — YAML round-trips scientific notation (e.g. 1e-4) as
+    # strings in PyYAML 6.x, which causes TypeError in torch.optim.AdamW.
+    t_cfg = cfg["training"]
+    lr           = float(t_cfg["lr"])
+    weight_decay = float(t_cfg.get("weight_decay", 1e-4))
+    total_epochs = int(t_cfg["epochs"])
+
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
-        lr=cfg["training"]["lr"],
-        weight_decay=cfg["training"].get("weight_decay", 1e-4),
+        lr=lr,
+        weight_decay=weight_decay,
         betas=(0.9, 0.98),      # slightly higher β₂ for transformer training
     )
 
     # Warmup + cosine annealing: warmup for 5% of total steps, then cosine decay
-    total_epochs = cfg["training"]["epochs"]
     warmup_epochs = max(1, int(total_epochs * 0.05))
     scheduler = torch.optim.lr_scheduler.SequentialLR(
         optimizer,
@@ -275,20 +281,20 @@ def train(cfg: dict):
             torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
                 T_max=total_epochs - warmup_epochs,
-                eta_min=cfg["training"].get("lr_min", 1e-6),
+                eta_min=float(t_cfg.get("lr_min", 1e-6)),
             ),
         ],
         milestones=[warmup_epochs],
     )
 
-    criterion   = nn.CrossEntropyLoss(label_smoothing=cfg["training"].get("label_smoothing", 0.05))
-    align_coef  = cfg.get("vera", {}).get("alignment_loss_coef", 0.1)
-    reg_coef    = cfg.get("vera", {}).get("regression_loss_coef", 0.5)
-    grad_clip   = cfg["training"].get("grad_clip", 1.0)
-    out_dir     = Path(cfg["training"]["output_dir"])
+    criterion   = nn.CrossEntropyLoss(label_smoothing=float(t_cfg.get("label_smoothing", 0.05)))
+    align_coef  = float(cfg.get("vera", {}).get("alignment_loss_coef", 0.1))
+    reg_coef    = float(cfg.get("vera", {}).get("regression_loss_coef", 0.5))
+    grad_clip   = float(t_cfg.get("grad_clip", 1.0))
+    out_dir     = Path(t_cfg["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    patience         = cfg["training"].get("early_stopping_patience", 10)
+    patience         = int(t_cfg.get("early_stopping_patience", 10))
     patience_counter = 0
     log, best_val_acc = [], 0.0
 
