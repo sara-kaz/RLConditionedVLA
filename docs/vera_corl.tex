@@ -643,7 +643,6 @@ planned for the camera-ready version.
   \modelname\ reports action-classification accuracy (our metric, currently);
   all other entries report simulation task success.
   $^\star$D$\to$D: train on environment D, evaluate on environment D (same domain).
-  $^\dagger$ABCD$\to$D: train on A,B,C,D; evaluate on D (unseen visual domain, harder).
   Chain = average consecutive tasks completed (out of 5).}
 \label{tab:prior_lt_calvin}
 \small
@@ -668,19 +667,10 @@ MCIL~\citep{mees2022calvin}
   & CALVIN D$\to$D$^\star$     & 52.8\%   & 0.67 & Task success \\
 HULC~\citep{mees2022calvin}
   & CALVIN D$\to$D$^\star$     & 91.8\%   & 3.06 & Task success \\
-MCIL~\citep{mees2022calvin}
-  & CALVIN ABCD$\to$D$^\dagger$ & 35.0\%  & 0.53 & Task success \\
-HULC~\citep{mees2022calvin}
-  & CALVIN ABCD$\to$D$^\dagger$ & 88.9\%  & 2.82 & Task success \\
-HULC++~\citep{mees2022calvin}
-  & CALVIN ABCD$\to$D$^\dagger$ & ${\sim}$90\% & 3.07 & Task success \\
-GR-1~\citep{wu2024gr1}
-  & CALVIN ABCD$\to$D$^\dagger$ & 85.4\%  & 4.21 & Task success \\
 \textbf{\modelname\ Mode B (ours)}
   & CALVIN D$\to$D (planned)   & \textit{pending} & — & \textbf{Cls. acc.}$^\ddagger$ \\
 \bottomrule
-\multicolumn{5}{l}{\footnotesize $^\ddagger$Cls.\ acc.\ = discrete 8-bin action-classification accuracy; not directly
-comparable to task success.} \\
+\multicolumn{5}{l}{\footnotesize $^\ddagger$Cls.\ acc.\ = discrete 8-bin action-classification accuracy; not directly comparable to task success.} \\
 \multicolumn{5}{l}{\footnotesize Simulation rollout results on both benchmarks are planned for the camera-ready version.} \\
 \end{tabular}
 \end{table}
