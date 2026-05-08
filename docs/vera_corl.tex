@@ -645,6 +645,9 @@ planned for the camera-ready version.
   The two metrics are \emph{not directly comparable}: task success measures
   closed-loop episode outcomes; classification accuracy measures single-step
   action-bin agreement with the expert on held-out windows (random baseline = 12.5\%).
+  Language-Table numbers are from Durante et al.~\citep{durante2024agent} (MCIL, BC, IAFM)
+  and Lynch et al.~\citep{lynch2023languagetable} (LAVA, Table~VI ablation).
+  CALVIN D$\to$D numbers are from Mees et al.~\citep{mees2022hulc} (Figure~3).
   \modelname's simulation rollout results are planned for the camera-ready version.
   $^\star$D$\to$D: train on environment D, evaluate on environment D (same visual domain).
   Chain = mean consecutive tasks completed out of 5.}
@@ -656,19 +659,23 @@ planned for the camera-ready version.
 \toprule
 \textbf{Method} & \textbf{Benchmark} & \textbf{Task Success} & \textbf{Chain} \\
 \midrule
-\multicolumn{4}{l}{\textit{Language-Table — simulation task success rate}} \\
-BC baseline~\citep{lynch2023languagetable}
-  & Lang-Table (sim) & ${\sim}$40\% & — \\
-Language-Table model~\citep{lynch2023languagetable}
-  & Lang-Table (sim) & ${\sim}$68\% & — \\
+\multicolumn{4}{l}{\textit{Language-Table — simulation task success rate~\citep{durante2024agent,lynch2023languagetable}}} \\
+MCIL~\citep{durante2024agent}
+  & Lang-Table (sim) & 28.2\% & — \\
+BC (no pretraining)~\citep{durante2024agent}
+  & Lang-Table (sim) & 40.0\% & — \\
 IAFM~\citep{durante2024agent}
-  & Lang-Table (sim) & ${\sim}$65\% & — \\
+  & Lang-Table (sim) & 42.0\% & — \\
+Language-Table LAVA~\citep{lynch2023languagetable}
+  & Lang-Table (sim) & 77.2\% & — \\
 \midrule
-\multicolumn{4}{l}{\textit{CALVIN D$\to$D$^\star$ — 1-task success + chain length (higher is better)}} \\
-MCIL~\citep{mees2022calvin}
-  & CALVIN D$\to$D & 52.8\% & 0.67 \\
-HULC~\citep{mees2022calvin}
-  & CALVIN D$\to$D & 91.8\% & 3.06 \\
+\multicolumn{4}{l}{\textit{CALVIN D$\to$D$^\star$ — 1-task success + avg chain (higher is better)~\citep{mees2022hulc}}} \\
+GCBC~\citep{mees2022hulc}
+  & CALVIN D$\to$D & 64.7\% & 1.11 \\
+MCIL~\citep{mees2022hulc}
+  & CALVIN D$\to$D & 76.4\% & 1.82 \\
+HULC~\citep{mees2022hulc}
+  & CALVIN D$\to$D & \textbf{82.7\%} & \textbf{2.64} \\
 \bottomrule
 \multicolumn{4}{l}{\footnotesize \modelname\ results will appear here once simulation rollouts are complete (camera-ready).} \\
 \end{tabular}
