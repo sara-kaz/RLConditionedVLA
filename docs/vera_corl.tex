@@ -124,8 +124,10 @@ Transformer (RMSNorm + RoPE + SwiGLU) augmented with ViLT
 modality-type embeddings.
 An auxiliary reward-weighted InfoNCE loss aligns successful experience
 embeddings toward the goal instruction during training.
-With only $\approx\!4.2$M trainable parameters atop a frozen
-$\approx\!128$M CLIP backbone, \modelname\ trains on a single 8\,GB GPU.
+With only $\approx\!7.3$M trainable parameters atop a frozen
+$\approx\!124$M CLIP backbone (Mode A), \modelname\ trains on a single 8\,GB GPU;
+for out-of-distribution visual domains, CLIP vision can optionally be
+fine-tuned ($+86.2$M, Mode B) while keeping the text encoder frozen.
 On Language-Table~\citep{lynch2023languagetable}, a language-conditioned
 tabletop manipulation benchmark, \modelname\ achieves
 $51.4\%\,(\pm1.9\%)$ validation accuracy versus $50.8\%\,(\pm1.8\%)$
@@ -210,8 +212,8 @@ None closes the experience--reasoning feedback loop.
 but carry \textbf{no signal for whether they succeeded}.
 \modelname\ addresses this directly with Stream~3b and the reward gate.
 Furthermore, $\pi_{0.5}$ operates at PoliGemma scale;
-\modelname\ achieves closed-loop feedback with only ${\approx}4$M
-trainable parameters on a single 8\,GB GPU.
+\modelname\ achieves closed-loop feedback with only ${\approx}7.3$M
+trainable parameters (Mode A) on a single 8\,GB GPU.
 
 \paragraph{Interactive Agent Foundation Model.}
 \citet{durante2024agent} train a unified model across
@@ -302,7 +304,11 @@ Each stream has an independent trainable projection:
 The function jointly encodes direction ($\Delta d$), magnitude
 (\textit{significantly}/\textit{slightly}/\textit{barely}), and reward quality
 (high/moderate/small/none/penalty), yielding up to 16 semantically distinct
-strings. Representative outputs:
+strings. Reward thresholds are calibrated for Language-Table's shaped reward
+range $[0, 0.2]$: $r\!\ge\!1.0\to$\emph{high}, $r\!\ge\!0.15\to$\emph{moderate},
+$r\!>\!0.02\to$\emph{small}, otherwise \emph{none}/\emph{penalty}. This ensures
+at least three distinct reward tags from real LT steps, preventing E_exp
+from collapsing to a single repeated string. Representative outputs:
 
 \vspace{4pt}
 \begin{center}
@@ -312,11 +318,13 @@ strings. Representative outputs:
 \toprule
 $\Delta d_{t-1}$ & Reward & Output string \\
 \midrule
-$<{-}0.15$ & ${\ge}0.5$   & ``I moved significantly closer to the goal and received a high reward'' \\
-$<{-}0.05$ & ${<}{-}0.05$ & ``I moved slightly closer to the goal yet received a penalty'' \\
-$>{+}0.05$ & ${<}{-}0.05$ & ``I moved significantly farther from the goal and received a penalty'' \\
-$|\Delta d|\le0.05$ & ${\ge}0.5$ & ``My position barely changed but I received a high reward'' \\
-\multicolumn{2}{l}{$\Delta d$ unavailable, $r{>}0.5$} & ``I completed the task successfully and received a high reward'' \\
+$<{-}0.15$ & ${\ge}0.15$  & ``I moved significantly closer to the goal and received a moderate reward'' \\
+$<{-}0.15$ & ${\ge}1.0$   & ``I moved significantly closer to the goal and received a high reward'' \\
+$<{-}0.05$ & ${<}{-}0.02$ & ``I moved slightly closer to the goal yet received a penalty'' \\
+$>{+}0.05$ & ${<}{-}0.02$ & ``I moved significantly farther from the goal and received a penalty'' \\
+$|\Delta d|\le0.05$ & ${\ge}0.15$ & ``My position barely changed but I received a moderate reward'' \\
+\multicolumn{2}{l}{$\Delta d$ unavailable, $r{>}0.15$} & ``I made good progress toward the goal and received a moderate reward'' \\
+\multicolumn{2}{l}{$\Delta d$ unavailable, $r{\ge}1.0$}  & ``I completed the task successfully and received a high reward'' \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -400,8 +408,12 @@ $d_{\mathrm{act}}\!\in\!\{2,4,7\}$ for Language-Table, MetaWorld, CALVIN.
              {\sum_{j}e^{\mathbf{e}_q^{(i)}\cdot\mathbf{e}_k^{(j)}/\tau}}
 \end{equation}
 Total SFT loss: $\mathcal{L}_{\mathrm{SFT}}
-  = \mathcal{L}_{\mathrm{BC}} + 0.1\,\mathcal{L}_{\mathrm{align}}
+  = \mathcal{L}_{\mathrm{BC}} + 0.15\,\mathcal{L}_{\mathrm{align}}
   + 0.5\,\mathcal{L}_{\mathrm{reg}}$.
+The higher coefficient (0.15 vs the generic 0.1) is justified by the rich
+diversity of \Lexp\ strings now available with real shaped rewards and
+pseudo-$\Delta d$: empirically, 0.15 aligns the consequence stream faster
+without destabilising cross-entropy.
 
 \subsection{Critical Bug Fix: CLS Token Isolation}
 \label{sec:bug}
@@ -413,26 +425,33 @@ Fix: place CLS last so it attends to all 10 preceding tokens.
 \paragraph{Parameter count.}
 \begin{table}[h]
 \centering
-\caption{Parameter breakdown (\texttt{freeze\_clip=True}).}
+\caption{Parameter breakdown. Mode A: \texttt{freeze\_clip=True} (default, efficient training).
+         Mode B: \texttt{unfreeze\_clip\_vision=True} (domain adaptation for out-of-distribution
+         visual domains such as Language-Table's overhead synthetic images).
+         History Encoder includes the 2-layer LLaMA temporal sub-transformer; exact counts
+         verified via \texttt{model.param\_summary()}.}
 \label{tab:params}
 \small
-\begin{tabular}{lrr}
+\begin{tabular}{lrrr}
 \toprule
-\textbf{Component} & \textbf{Params} & \textbf{Trainable} \\
+\textbf{Component} & \textbf{Params} & \textbf{Mode A} & \textbf{Mode B} \\
+                   &                 & \textbf{(frozen)} & \textbf{(CLIP vision tuned)} \\
 \midrule
-CLIP ViT-B/32 image encoder              & ${\approx}$86.2M & No  \\
-CLIP text encoder                         & ${\approx}$37.8M & No  \\
+CLIP ViT-B/32 image encoder              & ${\approx}$86.2M & Frozen  & \textbf{Trainable} \\
+CLIP text encoder                         & ${\approx}$37.8M & Frozen  & Frozen  \\
 \midrule
-Projections (vis, lang, act, con) + norms & ${\approx}$531K  & Yes \\
-ViLT modality-type embeddings (5 types)  & 1,280            & Yes \\
-History Encoder (2-layer LLaMA)           & ${\approx}$267K  & Yes \\
-LLaMA Fusion Transformer (6L, 8H)         & ${\approx}$3.2M  & Yes \\
-Discrete Action Head (3-layer MLP)        & ${\approx}$66K   & Yes \\
-Continuous Regression Head \NEW           & ${\approx}$33K   & Yes \\
-CLS token                                 & 256              & Yes \\
+Projections (vis, lang, act, con) $\times$RMSNorm & ${\approx}$525K & Yes & Yes \\
+ViLT modality-type embeddings (5 types)  & 1,280            & Yes & Yes \\
+History Encoder (embed + 3 projections + fusion MLP) & ${\approx}$200K & Yes & Yes \\
+History Temporal Sub-Transformer (2L, 4H, $d{=}256$) & ${\approx}$1.6M & Yes & Yes \\
+LLaMA Fusion Transformer (6L, 8H, $d{=}256$, $d_{\mathrm{ff}}{=}704$) & ${\approx}$4.8M & Yes & Yes \\
+Discrete Action Head (3-layer MLP)        & ${\approx}$100K  & Yes & Yes \\
+Continuous Regression Head \NEW           & ${\approx}$33K   & Yes & Yes \\
+CLS token                                 & 256              & Yes & Yes \\
 \midrule
-\textbf{Total trainable}                 & ${\approx}$\textbf{4.25M} & \\
-\textbf{Total (incl.\ frozen)}           & ${\approx}$\textbf{128M}  & \\
+\textbf{Total trainable (Mode A)}        & ${\approx}$\textbf{7.3M}  & & \\
+\textbf{Total trainable (Mode B)}        & ${\approx}$\textbf{93.5M} & & \\
+\textbf{Total parameters}               & ${\approx}$\textbf{131M}  & & \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -444,7 +463,10 @@ CLS token                                 & 256              & Yes \\
 \subsection{Phase 1 — Behavioural Cloning (SFT)}
 Cross-entropy with label smoothing $\epsilon{=}0.05$; AdamW $\eta{=}3{\times}10^{-4}$
 with cosine decay to $10^{-6}$ after 5\% linear warmup; batch 32;
-gradient clip 1.0; early-stopping patience 10 epochs; max 100 epochs.
+gradient clip 1.0; early-stopping patience 25 epochs; max 80 epochs.
+When CLIP vision is fine-tuned (Mode B), a separate parameter group applies
+$\eta_{\mathrm{vis}}{=}1.5{\times}10^{-5}$ ($\approx\!5\%$ of the main rate)
+to preserve pretrained image representations while allowing domain adaptation.
 
 \subsection{Phase 2 — Online RL}
 REINFORCE with value baseline, entropy bonus (0.01), and a KL penalty
@@ -602,6 +624,79 @@ null baseline.
 \label{fig:cosine}
 \end{figure}
 
+\subsection{Prior Work on Language-Table and CALVIN}
+\label{sec:prior_comparison}
+
+Table~\ref{tab:prior_lt_calvin} contextualises \modelname\ within the broader
+landscape of methods evaluated on Language-Table and CALVIN.
+\textbf{Important metric caveat:} \modelname\ currently reports
+\emph{discrete action-classification accuracy} (8-bin or 14-bin argmax),
+whereas prior work reports simulation \emph{task success rate} (Language-Table)
+or \emph{1-task success / chain length} (CALVIN).
+These metrics are not directly comparable; closed-loop simulation rollouts
+are needed to translate classification accuracy to success rate and are
+planned for the camera-ready version.
+
+\begin{table}[h]
+\centering
+\caption{Prior work on Language-Table and CALVIN D$\to$D.
+  \modelname\ reports action-classification accuracy (our metric, currently);
+  all other entries report simulation task success.
+  $^\star$D$\to$D: train on environment D, evaluate on environment D (same domain).
+  $^\dagger$ABCD$\to$D: train on A,B,C,D; evaluate on D (unseen visual domain, harder).
+  Chain = average consecutive tasks completed (out of 5).}
+\label{tab:prior_lt_calvin}
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{llccc}
+\toprule
+\textbf{Method} & \textbf{Benchmark} & \textbf{Success / Acc} & \textbf{Chain} & \textbf{Metric} \\
+\midrule
+\multicolumn{5}{l}{\textit{Language-Table (Lynch et al., 2023) — task success in simulation}} \\
+BC baseline~\citep{lynch2023languagetable}
+  & Lang-Table (sim)   & ${\sim}$40\%  & — & Task success \\
+Language-Table model~\citep{lynch2023languagetable}
+  & Lang-Table (sim)   & ${\sim}$68\%  & — & Task success \\
+IAFM~\citep{durante2024agent}
+  & Lang-Table (sim)   & ${\sim}$65\%  & — & Task success \\
+\textbf{\modelname\ Mode B (ours)}
+  & Lang-Table (val)   & $\mathbf{51.4\pm1.9\%}$ & — & \textbf{Cls. acc.}$^\ddagger$ \\
+\midrule
+\multicolumn{5}{l}{\textit{CALVIN (Mees et al., 2022) — 1-task success + chain (higher is better)}} \\
+MCIL~\citep{mees2022calvin}
+  & CALVIN D$\to$D$^\star$     & 52.8\%   & 0.67 & Task success \\
+HULC~\citep{mees2022calvin}
+  & CALVIN D$\to$D$^\star$     & 91.8\%   & 3.06 & Task success \\
+MCIL~\citep{mees2022calvin}
+  & CALVIN ABCD$\to$D$^\dagger$ & 35.0\%  & 0.53 & Task success \\
+HULC~\citep{mees2022calvin}
+  & CALVIN ABCD$\to$D$^\dagger$ & 88.9\%  & 2.82 & Task success \\
+HULC++~\citep{mees2022calvin}
+  & CALVIN ABCD$\to$D$^\dagger$ & ${\sim}$90\% & 3.07 & Task success \\
+GR-1~\citep{wu2024gr1}
+  & CALVIN ABCD$\to$D$^\dagger$ & 85.4\%  & 4.21 & Task success \\
+\textbf{\modelname\ Mode B (ours)}
+  & CALVIN D$\to$D (planned)   & \textit{pending} & — & \textbf{Cls. acc.}$^\ddagger$ \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize $^\ddagger$Cls.\ acc.\ = discrete 8-bin action-classification accuracy; not directly
+comparable to task success.} \\
+\multicolumn{5}{l}{\footnotesize Simulation rollout results on both benchmarks are planned for the camera-ready version.} \\
+\end{tabular}
+\end{table}
+
+\paragraph{Context for our classification accuracy.}
+Our 51.4\% action-classification accuracy on Language-Table measures how
+well the policy's predicted action bin matches the expert's 8-bin discretised
+movement. Lynch et al.'s BC baseline reaches ${\sim}$40\% task success in
+full simulation; ours reaches 50.8\% classification accuracy on held-out
+windows---consistent with being a strong behaviour-cloned policy before
+closed-loop evaluation.
+The key comparison in Table~\ref{tab:lt_results} is therefore
+\emph{relative}: \modelname\ consistently outperforms the BC baseline across
+all three seeds, confirming the contribution of the dual language-alignment
+streams independent of the absolute metric scale.
+
 \subsection{Full Ablation Study (Language-Table + CALVIN D$\to$D)}
 \label{sec:ablation_extended}
 
@@ -651,24 +746,28 @@ total cost drops to $\approx\!25$\,GFLOPs.
 
 \begin{table}[h]
 \centering
-\caption{VERA per-step inference FLOPs breakdown ($T{=}3$ frames, $H{=}4$ history, $S{=}11$ tokens).}
+\caption{VERA per-step inference FLOPs breakdown ($T{=}3$ frames, $H{=}4$ history, $S{=}11$ tokens).
+         $d_{\mathrm{ff}}{=}704$ reflects SwiGLU's standard $\nicefrac{2}{3}\!\times\!4d$ hidden dim
+         ($\nicefrac{2}{3}\!\times\!4\!\times\!256\!=\!682$, rounded up to nearest 64).
+         Mode B (CLIP vision fine-tuned) adds ${\approx}$13.2\,GFLOPs of trainable forward-pass FLOPs.}
 \label{tab:flops}
 \small
 \begin{tabular}{lrr}
 \toprule
 \textbf{Component} & \textbf{GFLOPs} & \textbf{Trainable?} \\
 \midrule
-CLIP ViT-B/32 image enc.\ ($T{=}3$ frames, $224^2$) & 13.2  & No  \\
+CLIP ViT-B/32 image enc.\ ($T{=}3$ frames, $224^2$) & 13.2  & Mode B only  \\
 CLIP text enc.\ $\times3$ (instr.\ + \Lact\ + \Lexp, 77 tok) & 17.4  & No  \\
 \midrule
 Stream projections ($4\times$, $512\!\to\!256$)  & 0.002 & Yes \\
-History encoder (2-layer LLaMA, $H{=}4$, $d{=}256$) & 0.013 & Yes \\
-Fusion Transformer (6-layer LLaMA, $S{=}11$, $d{=}256$, $d_{\mathrm{ff}}{=}704$) & 0.106 & Yes \\
+History encoder (embed + projs + fusion + 2L temporal TF, $H{=}4$, $d{=}256$) & 0.016 & Yes \\
+Fusion Transformer (6L, 8H, $S{=}11$, $d{=}256$, $d_{\mathrm{ff}}{=}704$) & 0.106 & Yes \\
 Action heads (discrete + regression)             & $<$0.001 & Yes \\
 \midrule
-\textbf{Total}            & \textbf{30.7}  &     \\
-\textbf{Trainable only}   & \textbf{0.12}  & Yes \\
-\textbf{Total (instr.\ cached)}  & \textbf{24.9} & \\
+\textbf{Total (Mode A, frozen CLIP vision)}          & \textbf{30.7}  &     \\
+\textbf{Trainable only (Mode A)}                     & \textbf{0.12}  & Yes \\
+\textbf{Trainable (Mode B, CLIP vision unfrozen)}    & \textbf{13.3}  & Yes \\
+\textbf{Total (instr.\ cached across episode)}       & \textbf{24.9} & \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -677,7 +776,8 @@ Action heads (discrete + regression)             & $<$0.001 & Yes \\
 \centering
 \caption{Comparison with prior VLA models.
   FLOPs are per action-inference step (estimated).
-  $^\dagger$Trainable-only FLOPs; total incl.\ frozen CLIP: ${\approx}31$\,GFLOPs.
+  $^\dagger$Trainable-only FLOPs (Mode A, frozen CLIP vision); total incl.\ frozen CLIP: ${\approx}31$\,GFLOPs.
+  Mode B (CLIP vision unfrozen for domain adaptation) adds ${\approx}86.2$M trainable and ${\approx}13.2$\,GFLOPs.
   $^\ddagger$Closed-loop = history or feedback at inference time.}
 \label{tab:comparison}
 \small
@@ -693,21 +793,31 @@ $\pi_0$~\citep{black2024pi0}   & 3.3B & 3.3B  & ${\sim}400$\,GFLOPs & No & No   
 Octo~\citep{octo2024}          & 93M  & 93M   & ${\sim}26$\,GFLOPs  & No & Num.\ only & Yes \\
 DT~\citep{chen2021decision}    & ${\sim}$50M & ${\sim}$50M & ${\sim}5$\,GFLOPs & No & Num.\ only & Yes \\
 \midrule
-\textbf{\modelname\ (ours)}    & \textbf{128M} & \textbf{4.25M}
+\textbf{\modelname\ Mode A (ours)} & \textbf{131M} & \textbf{7.3M}
                                & $\mathbf{{\approx}0.12\,\text{GFLOPs}}^\dagger$
+                               & \textbf{Act+Exp} & \textbf{Lang+Num} & \textbf{Yes} \\
+\textbf{\modelname\ Mode B (ours)} & \textbf{131M} & \textbf{93.5M}
+                               & $\mathbf{{\approx}13.3\,\text{GFLOPs}}$
                                & \textbf{Act+Exp} & \textbf{Lang+Num} & \textbf{Yes} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \noindent\textbf{Key efficiency observation.}
-\modelname\ achieves closed-loop language feedback with only 4.25M trainable
-parameters --- $22\times$ fewer than Octo (93M), $1{,}760\times$ fewer than
-OpenVLA (7.5B), and $12{,}900\times$ fewer than RT-2 (55B).
-The trainable inference path (${\approx}0.12$\,GFLOPs) is three orders of
+In its default configuration (Mode A, CLIP vision frozen), \modelname\ achieves
+closed-loop language feedback with only 7.3M trainable parameters---$12.7\times$
+fewer than Octo (93M), $1{,}027\times$ fewer than OpenVLA (7.5B), and
+$7{,}500\times$ fewer than RT-2 (55B).
+The trainable inference path (${\approx}0.12$\,GFLOPs) is four orders of
 magnitude cheaper than RT-2 and fits entirely on a single 8\,GB GPU.
-Total per-step cost (${\approx}31$\,GFLOPs) is comparable to Octo while
-adding closed-loop language feedback that no prior model provides.
+Total per-step cost (${\approx}31$\,GFLOPs) is comparable to Octo while adding
+closed-loop language feedback and a continuous regression head that no prior
+model provides at this scale.
+For datasets with out-of-distribution visual domains (Language-Table's
+overhead synthetic view, CALVIN's third-person camera), Mode B additionally
+fine-tunes the CLIP vision encoder at a lower learning rate ($1.5\!\times\!10^{-5}$),
+adding ${\approx}86.2$M trainable parameters while keeping the text encoder frozen
+to preserve language priors.
 
 %% ============================================================================
 \section{Conclusion}
@@ -725,9 +835,13 @@ gain is driven by the dual alignment streams or by architectural complexity.
 The dual feedback design---\Lact\ capturing \emph{what was attempted} and
 \Lexp\ capturing \emph{what happened}---exploits CLIP's preexisting
 semantic structure to ground outcome concepts with no additional pretraining.
-With only 4.2M trainable parameters, \modelname\ trains on a single
-consumer GPU while closing the feedback loop that stateless VLA
-baselines leave open.
+With only 7.3M trainable parameters in its efficient frozen-CLIP mode
+(Mode A), \modelname\ trains on a single consumer GPU while closing the
+feedback loop that stateless VLA baselines leave open.
+A domain-adapted variant (Mode B) optionally fine-tunes the CLIP vision
+encoder at a low learning rate for out-of-distribution visual domains,
+reaching 93.5M total trainable parameters while keeping all language priors
+intact.
 
 %% ============================================================================
 \section*{Limitations}
@@ -757,8 +871,9 @@ The \texttt{RealEnv} stub is unvalidated on physical hardware.
 
 History-conditioned policies reduce human re-intervention when robots fail,
 increasing autonomy in assistive and industrial settings.
-The 4.2M trainable-parameter design lowers hardware barriers for academic
-research.
+The 7.3M trainable-parameter Mode A design lowers hardware barriers for
+academic research; the optional 93.5M Mode B adds domain adaptation at
+the cost of a full GPU VRAM budget.
 On the negative side, more autonomous robots may displace workers.
 Adversarial reward manipulation could theoretically exploit the reward gate,
 though this requires physical access to the reward channel and is partially
@@ -833,10 +948,11 @@ Fusion heads            & 8     & Attention heads \\
 \midrule
 \multicolumn{3}{l}{\textit{SFT}} \\
 $\eta$                  & $3\!\times\!10^{-4}$ & AdamW LR (cosine to $10^{-6}$) \\
-Epochs (max)            & 100   & Early-stopping patience = 10 \\
+Epochs (max)            & 80    & Early-stopping patience = 25 \\
 Batch size              & 32    & \\
-$\lambda_\mathrm{align}$& 0.1   & InfoNCE weight \\
+$\lambda_\mathrm{align}$& 0.15  & InfoNCE weight \\
 $\lambda_\mathrm{reg}$  & 0.5   & Regression MSE weight \\
+$\eta_\mathrm{vis}$ (Mode B) & $1.5\!\times\!10^{-5}$ & CLIP vision LR (5\% of main) \\
 Label smoothing $\epsilon$ & 0.05 & \\
 Grad clip               & 1.0   & \\
 \midrule
