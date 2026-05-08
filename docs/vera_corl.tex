@@ -639,53 +639,58 @@ planned for the camera-ready version.
 
 \begin{table}[h]
 \centering
-\caption{Prior work on Language-Table and CALVIN D$\to$D.
-  \modelname\ reports action-classification accuracy (our metric, currently);
-  all other entries report simulation task success.
-  $^\star$D$\to$D: train on environment D, evaluate on environment D (same domain).
-  Chain = average consecutive tasks completed (out of 5).}
+\caption{Prior work on Language-Table and CALVIN D$\to$D reporting
+  \textbf{simulation task success}---a fundamentally different metric from
+  \modelname's action-classification accuracy.
+  The two metrics are \emph{not directly comparable}: task success measures
+  closed-loop episode outcomes; classification accuracy measures single-step
+  action-bin agreement with the expert on held-out windows (random baseline = 12.5\%).
+  \modelname's simulation rollout results are planned for the camera-ready version.
+  $^\star$D$\to$D: train on environment D, evaluate on environment D (same visual domain).
+  Chain = mean consecutive tasks completed out of 5.}
 \label{tab:prior_lt_calvin}
 \small
 \setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.2}
-\begin{tabular}{llccc}
+\begin{tabular}{llcc}
 \toprule
-\textbf{Method} & \textbf{Benchmark} & \textbf{Success / Acc} & \textbf{Chain} & \textbf{Metric} \\
+\textbf{Method} & \textbf{Benchmark} & \textbf{Task Success} & \textbf{Chain} \\
 \midrule
-\multicolumn{5}{l}{\textit{Language-Table (Lynch et al., 2023) — task success in simulation}} \\
+\multicolumn{4}{l}{\textit{Language-Table — simulation task success rate}} \\
 BC baseline~\citep{lynch2023languagetable}
-  & Lang-Table (sim)   & ${\sim}$40\%  & — & Task success \\
+  & Lang-Table (sim) & ${\sim}$40\% & — \\
 Language-Table model~\citep{lynch2023languagetable}
-  & Lang-Table (sim)   & ${\sim}$68\%  & — & Task success \\
+  & Lang-Table (sim) & ${\sim}$68\% & — \\
 IAFM~\citep{durante2024agent}
-  & Lang-Table (sim)   & ${\sim}$65\%  & — & Task success \\
-\textbf{\modelname\ Mode B (ours)}
-  & Lang-Table (val)   & $\mathbf{51.4\pm1.9\%}$ & — & \textbf{Cls. acc.}$^\ddagger$ \\
+  & Lang-Table (sim) & ${\sim}$65\% & — \\
 \midrule
-\multicolumn{5}{l}{\textit{CALVIN (Mees et al., 2022) — 1-task success + chain (higher is better)}} \\
+\multicolumn{4}{l}{\textit{CALVIN D$\to$D$^\star$ — 1-task success + chain length (higher is better)}} \\
 MCIL~\citep{mees2022calvin}
-  & CALVIN D$\to$D$^\star$     & 52.8\%   & 0.67 & Task success \\
+  & CALVIN D$\to$D & 52.8\% & 0.67 \\
 HULC~\citep{mees2022calvin}
-  & CALVIN D$\to$D$^\star$     & 91.8\%   & 3.06 & Task success \\
-\textbf{\modelname\ Mode B (ours)}
-  & CALVIN D$\to$D (planned)   & \textit{pending} & — & \textbf{Cls. acc.}$^\ddagger$ \\
+  & CALVIN D$\to$D & 91.8\% & 3.06 \\
 \bottomrule
-\multicolumn{5}{l}{\footnotesize $^\ddagger$Cls.\ acc.\ = discrete 8-bin action-classification accuracy; not directly comparable to task success.} \\
-\multicolumn{5}{l}{\footnotesize Simulation rollout results on both benchmarks are planned for the camera-ready version.} \\
+\multicolumn{4}{l}{\footnotesize \modelname\ results will appear here once simulation rollouts are complete (camera-ready).} \\
 \end{tabular}
 \end{table}
 
-\paragraph{Context for our classification accuracy.}
-Our 51.4\% action-classification accuracy on Language-Table measures how
-well the policy's predicted action bin matches the expert's 8-bin discretised
-movement. Lynch et al.'s BC baseline reaches ${\sim}$40\% task success in
-full simulation; ours reaches 50.8\% classification accuracy on held-out
-windows---consistent with being a strong behaviour-cloned policy before
-closed-loop evaluation.
-The key comparison in Table~\ref{tab:lt_results} is therefore
-\emph{relative}: \modelname\ consistently outperforms the BC baseline across
-all three seeds, confirming the contribution of the dual language-alignment
-streams independent of the absolute metric scale.
+\paragraph{Why we cannot yet compare directly.}
+Simulation task success and discrete action-classification accuracy are
+fundamentally different quantities.
+Task success measures whether a full closed-loop episode achieves its goal;
+classification accuracy measures single-step agreement with the expert on
+static held-out windows, with a random baseline of $12.5\%$ (one of eight bins).
+A policy with 51\% classification accuracy could achieve either high or low
+task success depending on how errors compound across a 20-step episode and
+whether errors occur at critical or non-critical moments.
+\textbf{The primary comparison in this paper is therefore Table~\ref{tab:lt_results}:
+\modelname\ vs.\ the BC baseline and ablation variants, all measured under
+the identical classification-accuracy protocol.}
+This \emph{relative} comparison directly isolates the contribution of the
+dual language-alignment streams, which is the core claim of the paper.
+Simulation rollout evaluation on Language-Table and CALVIN D$\to$D---enabling
+direct comparison with the numbers in Table~\ref{tab:prior_lt_calvin}---is
+planned for the camera-ready version.
 
 \subsection{Full Ablation Study (Language-Table + CALVIN D$\to$D)}
 \label{sec:ablation_extended}
