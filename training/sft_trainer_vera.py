@@ -189,10 +189,10 @@ def run_epoch(
                     and is_train):
                 prev_reward = reward_hist[:, -1]            # most recent reward
                 align = model.compute_alignment_loss(
-                    out["instr_emb"],
-                    out["action_lang_emb"],
+                    out["instr_proj"],          # d_model projected — gradient flows here
+                    out["action_lang_proj"],    # d_model projected — gradient flows here
                     prev_reward,
-                    out.get("consequence_emb"),             # None if stream disabled
+                    out.get("consequence_proj"),  # d_model projected or None
                 )
 
             # ── Continuous action regression loss ─────────────────────────────

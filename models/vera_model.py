@@ -993,20 +993,29 @@ class VERAModel(nn.Module):
             action_hist, reward_hist, action_vec_hist
         )
 
+        # Projected instruction embedding (d_model-dim, trainable — used for alignment)
+        instr_proj = lang_token.squeeze(1)   # (B, d_model)
+
         # 2. Action language feedback — Feedback Channel A (what was done)
-        action_lang_token = action_lang_emb = alignment_score = None
+        action_lang_token = action_lang_emb = action_lang_proj = alignment_score = None
         if self.use_lang_feedback:
             _pa = prev_action_idx if prev_action_idx is not None else action_hist[:, -1]
             _pr = prev_reward     if prev_reward     is not None else reward_hist[:, -1]
             action_lang_token, action_lang_emb = self.action_lang_encoder(_pa, _pr)
-            alignment_score = self.alignment_module.score(instr_emb, action_lang_emb)
+            # Use PROJECTED d_model embeddings for score — these have gradient
+            # through the trainable Linear+RMSNorm projection even though raw_emb
+            # was computed with no_grad.  Raw 512-dim frozen embeddings are constant
+            # → cosine never moves → zero gradient to projections.
+            action_lang_proj = action_lang_token.squeeze(1)          # (B, d_model)
+            alignment_score  = self.alignment_module.score(instr_proj, action_lang_proj)
 
         # 2b. Consequence language feedback — Stream 3b (what happened as a result)
-        consequence_token = consequence_emb = consequence_score = None
+        consequence_token = consequence_emb = consequence_proj = consequence_score = None
         if self.use_consequence_token:
             _pr = prev_reward if prev_reward is not None else reward_hist[:, -1]
             consequence_token, consequence_emb = self.consequence_encoder(_pr, state_delta)
-            consequence_score = self.alignment_module.score(instr_emb, consequence_emb)
+            consequence_proj  = consequence_token.squeeze(1)         # (B, d_model)
+            consequence_score = self.alignment_module.score(instr_proj, consequence_proj)
 
         # 3. CLS token at the end
         cls = self.cls_token.expand(B, -1, -1)                       # (B, 1, D)
@@ -1065,43 +1074,54 @@ class VERAModel(nn.Module):
             "logits":             logits,             # (B, num_actions)
             "action_vec":         action_vec,         # (B, action_dim) ∈ (-1, 1)
             "cls_features":       cls_features,       # (B, d_model)
-            "alignment_score":    alignment_score,    # (B,) cosine(instr, experience)
-            "consequence_score":  consequence_score,  # (B,) cosine(instr, reasoning)
-            "instr_emb":          instr_emb,          # (B, 512) raw CLIP
-            "action_lang_emb":    action_lang_emb,    # (B, 512) raw CLIP
-            "consequence_emb":    consequence_emb,    # (B, 512) raw CLIP
+            "alignment_score":    alignment_score,    # (B,) cosine(instr_proj, act_proj)
+            "consequence_score":  consequence_score,  # (B,) cosine(instr_proj, con_proj)
+            # Raw CLIP embeddings (frozen 512-dim) — kept for backward compat / logging
+            "instr_emb":          instr_emb,
+            "action_lang_emb":    action_lang_emb,
+            "consequence_emb":    consequence_emb,
+            # Projected d_model-dim embeddings — USE THESE for alignment loss
+            # (gradient flows through Linear+RMSNorm projection matrices)
+            "instr_proj":         instr_proj,
+            "action_lang_proj":   action_lang_proj,
+            "consequence_proj":   consequence_proj,
         }
 
     def compute_alignment_loss(
         self,
-        instr_emb:       torch.Tensor,
-        action_lang_emb: Optional[torch.Tensor],
-        rewards:         torch.Tensor,
-        consequence_emb: Optional[torch.Tensor] = None,
+        instr_proj:       torch.Tensor,           # (B, d_model) projected — TRAINABLE
+        action_lang_proj: Optional[torch.Tensor], # (B, d_model) projected — TRAINABLE
+        rewards:          torch.Tensor,
+        consequence_proj: Optional[torch.Tensor] = None,  # (B, d_model) projected — TRAINABLE
     ) -> torch.Tensor:
         """
-        Dual contrastive alignment loss:
-          • action alignment    : instr ↔ action_lang  (what I did matches the goal)
-          • consequence alignment: instr ↔ consequence  (what happened matches the goal) [NEW]
+        Dual contrastive alignment loss computed on PROJECTED d_model embeddings.
 
-        Both losses are averaged so the total magnitude stays comparable to the
-        original single-alignment setup regardless of which streams are active.
+        Critically, the InfoNCE is computed on the output of the trainable
+        Linear+RMSNorm projection layers — NOT on the raw 512-dim CLIP embeddings.
+        This ensures gradient flows to the projection matrices (W^(3a), W^(3b))
+        even though the underlying CLIP encoder is frozen.
+
+          • action alignment    : instr_proj ↔ action_proj  (what I did matches goal)
+          • consequence alignment: instr_proj ↔ consequence_proj  (what happened) [NEW]
+
+        Both losses averaged so magnitude stays consistent across ablations.
         """
         if not self.use_lang_feedback:
-            return torch.tensor(0.0, device=instr_emb.device)
+            return torch.tensor(0.0, device=instr_proj.device)
 
-        loss = torch.tensor(0.0, device=instr_emb.device)
+        loss = torch.tensor(0.0, device=instr_proj.device)
         n    = 0
 
-        if action_lang_emb is not None:
+        if action_lang_proj is not None:
             loss = loss + self.alignment_module.contrastive_loss(
-                instr_emb, action_lang_emb, rewards
+                instr_proj, action_lang_proj, rewards
             )
             n += 1
 
-        if consequence_emb is not None and self.use_consequence_token:
+        if consequence_proj is not None and self.use_consequence_token:
             loss = loss + self.alignment_module.contrastive_loss(
-                instr_emb, consequence_emb, rewards
+                instr_proj, consequence_proj, rewards
             )
             n += 1
 
