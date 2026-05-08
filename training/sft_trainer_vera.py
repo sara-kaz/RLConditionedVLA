@@ -177,7 +177,16 @@ def run_epoch(
             avh = batch.get("action_vec_hist")
             action_vec_hist = avh.to(device) if isinstance(avh, torch.Tensor) else None
 
+            # State delta for Stream 3b consequence verbalization.
+            # Provided by Language-Table loader as a pseudo dist-to-goal change
+            # derived from consecutive reward differences.  For legacy / synthetic
+            # episodes the dataset returns 0.0 scalars, which map to the
+            # "stationary" branch in verbalize_consequence (still informative).
+            sd = batch.get("state_delta")
+            state_delta = sd.to(device) if isinstance(sd, torch.Tensor) else None
+
             out = model(frames, lang_tokens, action_hist, reward_hist,
+                        state_delta=state_delta,
                         action_vec_hist=action_vec_hist)
             logits = out["logits"]                          # (B, A)
             ce     = criterion(logits, target)

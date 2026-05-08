@@ -357,13 +357,20 @@ def verbalize_consequence(reward: float, delta_dist: Optional[float] = None) -> 
     Returns a short past-tense sentence suitable for CLIP encoding.
     """
     # ── Reward magnitude bucket ────────────────────────────────────────────────
+    # Thresholds are calibrated to work across dataset reward scales:
+    #   MetaWorld / CALVIN : sparse {0, 1}  → "no" or "high"
+    #   Language-Table     : shaped [0, 0.2] → "no" / "small" / "moderate"
+    #   Synthetic          : uniform [-1, 1] → all five tags
+    # Lowering the "moderate" threshold to 0.15 (was 0.5) makes LT's
+    # shaped rewards ≥0.15 count as genuine progress — critical for E_exp
+    # diversity when most steps produce rewards in [0.02, 0.16].
     if reward >= 1.0:
         rew_tag = "high"
-    elif reward >= 0.5:
+    elif reward >= 0.15:
         rew_tag = "moderate"
-    elif reward > 0.05:
+    elif reward > 0.02:
         rew_tag = "small"
-    elif reward >= -0.05:
+    elif reward >= -0.02:
         rew_tag = "no"
     else:
         rew_tag = "negative"
@@ -394,8 +401,10 @@ def verbalize_consequence(reward: float, delta_dist: Optional[float] = None) -> 
                 return f"I moved farther from the goal unexpectedly"
 
         else:                                        # STATIONARY
-            if rew_tag in ("high", "moderate"):
+            if rew_tag == "high":
                 return "My position barely changed but I received a high reward"
+            elif rew_tag == "moderate":
+                return "My position barely changed but I received a moderate reward"
             elif rew_tag == "small":
                 return "My position barely changed with only a small positive reward"
             elif rew_tag == "negative":
@@ -403,11 +412,12 @@ def verbalize_consequence(reward: float, delta_dist: Optional[float] = None) -> 
             else:
                 return "I made no progress and received no reward"
 
-    # ── Fallback: reward-only (used during SFT when delta_dist unavailable) ───
+    # ── Fallback: reward-only (used when delta_dist unavailable) ─────────────
+    # Five distinct strings → E_exp is non-constant even without spatial info.
     if rew_tag == "high":
         return "I completed the task successfully and received a high reward"
     elif rew_tag == "moderate":
-        return "I made good progress toward the goal and received a reward"
+        return "I made good progress toward the goal and received a moderate reward"
     elif rew_tag == "small":
         return "I made partial progress and received a small positive reward"
     elif rew_tag == "no":

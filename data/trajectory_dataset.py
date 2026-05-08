@@ -22,6 +22,13 @@ Episode format (with low-level action vectors — recommended):
                           CALVIN         : 7   [x,y,z,roll,pitch,yaw,gripper]
                         If absent, action_vec_hist is returned as None and the
                         VERA model's history encoder falls back to discrete-only.
+      "state_deltas":   np.ndarray (T_ep,) float32
+                        Signed change in distance-to-goal at each step
+                        (negative = closer, positive = farther).
+                        Used by VERA's ConsequenceLanguageEncoder (Stream 3b) to
+                        produce rich direction×magnitude×reward consequence strings.
+                        For Language-Table, approximated from consecutive reward diffs.
+                        If absent, state_delta defaults to 0.0 (stationary fallback).
   }
 
 Each __getitem__ returns one training window centred on timestep t:
@@ -30,6 +37,7 @@ Each __getitem__ returns one training window centred on timestep t:
   action_hist    : (history_len,)              int64   — discrete indices
   reward_hist    : (history_len,)              float32
   action_vec_hist: (history_len, action_dim)   float32  OR  None
+  state_delta    : ()                          float32  — signed dist change at t
   target         : int                         — discrete action label at t
   target_vec     : (action_dim,)               float32  — continuous action at t (OR None)
 
@@ -298,12 +306,28 @@ def load_language_table(root: str, skip_stop_steps: bool = True) -> List[Dict]:
         if len(frames) < 2:
             continue
 
+        rewards_arr = np.array(rewards, dtype=np.float32)
+
+        # ── Pseudo state_delta from consecutive reward differences ────────────
+        # Language-Table rewards are shaped ∈ [0, ~0.2]; there is no explicit
+        # distance-to-goal in the step dict.  We approximate it from the reward
+        # improvement: Δr > 0 → agent moved closer to goal → negative delta_dist
+        # by convention (closer = negative).
+        #
+        # Scale factor 3.0 maps a typical LT Δr ≈ 0.05 to δd ≈ -0.15, which
+        # falls in the "significantly" magnitude bin of verbalize_consequence.
+        # Clipping at ±0.5 avoids outliers from noisy reward signals.
+        delta_r    = np.zeros_like(rewards_arr)
+        delta_r[1:] = rewards_arr[1:] - rewards_arr[:-1]
+        state_deltas = np.clip(-delta_r * 3.0, -0.5, 0.5).astype(np.float32)
+
         episodes.append({
             "frames":         np.stack(frames),
             "instruction":    instruction,
             "actions":        np.array(actions,  dtype=np.int64),
-            "rewards":        np.array(rewards,  dtype=np.float32),
+            "rewards":        rewards_arr,
             "action_vectors": np.stack(action_vecs).astype(np.float32),
+            "state_deltas":   state_deltas,          # (T,) signed dist-to-goal proxy
         })
 
     if n_stop_skipped:
@@ -611,6 +635,18 @@ class TrajectoryDataset(Dataset):
         # ── Target action (label for discrete classifier) ─────────────────────
         target = int(ep["actions"][t])
 
+        # ── State delta for Stream 3b consequence verbalization ──────────────
+        # Signed distance-to-goal change at timestep t.  Negative → got closer.
+        # For Language-Table episodes this is approximated from consecutive
+        # reward differences (computed in load_language_table).
+        # For other datasets / synthetic episodes it defaults to 0.0, which maps
+        # to the "stationary" branch in verbalize_consequence — still informative
+        # when combined with the reward bucket (e.g. "stationary + high reward"
+        # vs "stationary + no reward" are two distinct strings).
+        state_delta_val = 0.0
+        if "state_deltas" in ep:
+            state_delta_val = float(ep["state_deltas"][t])
+
         # ── Target continuous action vector (label for regression head) ────────
         # This is the expert's executed action at timestep t — the same step
         # whose discrete index is in `target`.  Truncated/padded to action_dim.
@@ -631,6 +667,7 @@ class TrajectoryDataset(Dataset):
             "action_hist":     action_hist,      # (history_len,)
             "reward_hist":     reward_hist,      # (history_len,)
             "action_vec_hist": action_vec_hist,  # (history_len, action_dim) or None
+            "state_delta":     torch.tensor(state_delta_val, dtype=torch.float32),  # scalar
             "target":          torch.tensor(target, dtype=torch.long),
             "target_vec":      target_vec,       # (action_dim,) or None
         }

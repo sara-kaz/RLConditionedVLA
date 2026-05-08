@@ -1,9 +1,12 @@
 # ── VERA-Robot-Learning Configuration ─────────────────────────────────────────
 # Vision-Language-Language-Action model with dual semantic+numerical feedback.
+# DEFAULT: Language-Table (Lynch et al., 2023) — 2-DoF planar push tasks.
+# See "Dataset Presets" section below for CALVIN / MetaWorld overrides.
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:
   num_actions:    8           # discrete action space size
+                              # Language-Table: 8 directional bins (arctan2 sectors)
   history_len:    4           # number of (action, reward) history steps
   num_vis_frames: 3           # number of video frames per observation
   fusion_layers:  6           # causal fusion transformer depth
@@ -12,12 +15,12 @@ model:
   d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
   dropout:        0.1
   freeze_clip:    true        # keep CLIP backbone frozen (recommended)
-  unfreeze_clip_vision: false # fine-tune ViT image encoder (text stays frozen)
-                              # Set true for Language-Table / CALVIN where CLIP
+  unfreeze_clip_vision: true  # fine-tune ViT image encoder (text stays frozen)
+                              # Recommended for Language-Table / CALVIN where CLIP
                               # pretrained vision is out-of-domain. Pair with
-                              # training.clip_vision_lr (default: 5% of main lr).
-  action_dim:     4           # continuous action vector dimension — MUST match dataset
-                              # MetaWorld=4 [Δx,Δy,Δz,gripper]  CALVIN=7  Language-Table=2
+                              # training.clip_vision_lr (much smaller than main lr).
+  action_dim:     2           # continuous action vector dimension — MUST match dataset
+                              # Language-Table=2 [Δx,Δy]  MetaWorld=4  CALVIN=7
 
 # ── VERA-Specific Settings ─────────────────────────────────────────────────────
 vera:
@@ -32,8 +35,11 @@ vera:
 
   # Auxiliary contrastive alignment loss coefficient (λ_align)
   # Applied to BOTH action and consequence alignment terms (averaged).
+  # 0.15 is stronger than the generic 0.1 default — justified because:
+  #   (a) real LT rewards are shaped (not sparse), giving richer alignment signal
+  #   (b) state_delta is now available → E_exp has high diversity (15+ strings)
   # Set to 0.0 to ablate all alignment losses.
-  alignment_loss_coef:    0.1
+  alignment_loss_coef:    0.15
 
   # Continuous action regression loss coefficient (λ_reg)
   # MSE between predicted action_vec and expert's executed action vector.
@@ -41,27 +47,28 @@ vera:
   # Set to 0.0 to ablate the regression head (discrete-only baseline).
   regression_loss_coef:   0.5
 
-  # Custom action vocabulary (null = use built-in generic descriptions)
-  # 8-bin angle-quantised vocabulary for Language-Table [Δx, Δy] actions:
-  #   bins correspond to arctan2(Δy,Δx) quantised into 8 equal sectors (π/4 each)
-  #   Uncomment the block below when training on Language-Table.
-  action_vocab: null
-  # action_vocab:                                   # ← Language-Table 2-DoF vocabulary
-  #   0: "I pushed the object to the right"         # angle ≈ 0°
-  #   1: "I pushed the object up and to the right"  # angle ≈ 45°
-  #   2: "I pushed the object upward"               # angle ≈ 90°
-  #   3: "I pushed the object up and to the left"   # angle ≈ 135°
-  #   4: "I pushed the object to the left"          # angle ≈ 180°
-  #   5: "I pushed the object down and to the left" # angle ≈ -135°
-  #   6: "I pushed the object downward"             # angle ≈ -90°
-  #   7: "I pushed the object down and to the right"# angle ≈ -45°
+  # Language-Table 8-bin angle-quantised action vocabulary.
+  # Bins correspond to arctan2(Δy,Δx) quantised into 8 equal sectors (π/4 each).
+  # These domain-specific strings give E_act stronger semantic signal than the
+  # generic "I performed action N" fallback used for MetaWorld / synthetic data.
+  action_vocab:
+    0: "I pushed the object to the right"
+    1: "I pushed the object up and to the right"
+    2: "I pushed the object upward"
+    3: "I pushed the object up and to the left"
+    4: "I pushed the object to the left"
+    5: "I pushed the object down and to the left"
+    6: "I pushed the object downward"
+    7: "I pushed the object down and to the right"
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 data:
-  episodes_path:       null     # path to dataset root or .pkl file; null = synthetic
-  dataset_type:        pkl      # "pkl" | "language_table" | "calvin"
-                                # language_table: expects root/episode_XXX/steps.pkl dirs
-                                # calvin:         expects root/training/*.npz + lang_annotations/
+  episodes_path:       null     # ← SET THIS to your Language-Table root directory
+                                # e.g. /content/drive/MyDrive/language_table_data
+                                # null → falls back to synthetic episodes (for testing)
+  dataset_type:        language_table  # "pkl" | "language_table" | "calvin"
+                                       # language_table: expects root/episode_XXX/steps.pkl
+                                       # calvin:         expects root/training/*.npz + lang_annotations/
   calvin_split:        training # only used when dataset_type=calvin
   synthetic_episodes:  200      # episodes to generate when no real data provided
   ep_len:              30       # average episode length for synthetic data
@@ -69,20 +76,21 @@ data:
 
 # ── Supervised Fine-Tuning (Behavioural Cloning) ──────────────────────────────
 training:
-  device:          auto         # "cuda" | "mps" | "cpu" | "auto"
-  epochs:          50
-  batch_size:      32
-  lr:              3e-4
-  lr_min:          1e-6
-  weight_decay:    1e-4
-  label_smoothing: 0.05         # prevents overconfidence in BC phase
-  grad_clip:       1.0
-  val_fraction:    0.1
-  num_workers:     2
-  save_every:      10
-  output_dir:      checkpoints/
-  clip_vision_lr:  1e-5          # LR for CLIP vision when unfreeze_clip_vision=true
-                                 # (much smaller than main lr to avoid destroying priors)
+  device:                auto   # "cuda" | "mps" | "cpu" | "auto"
+  epochs:                80     # enough for LT; early stopping fires if no improvement
+  batch_size:            32
+  lr:                    3e-4
+  lr_min:                1e-6
+  weight_decay:          1e-4
+  label_smoothing:       0.05   # prevents overconfidence in BC phase
+  grad_clip:             1.0
+  val_fraction:          0.1
+  num_workers:           2
+  save_every:            10
+  output_dir:            checkpoints/
+  early_stopping_patience: 25   # stop after N epochs with no val_acc improvement
+  clip_vision_lr:        1.5e-5 # LR for CLIP vision when unfreeze_clip_vision=true
+                                 # ~5% of main LR — avoids destroying ImageNet priors
 
 # ── Online RL Fine-Tuning ──────────────────────────────────────────────────────
 rl:
@@ -138,37 +146,36 @@ eval:
 #   action_vocab: null   # action token still present; consequence ablated separately above
 
 # ── Dataset Presets ─────────────────────────────────────────────────────────────
-# To train on Language-Table, override ONLY these keys (everything else stays default):
+# Language-Table is the DEFAULT above.  To switch to other datasets, override:
 #
+# MetaWorld (generic pick-place):
 #   data:
-#     episodes_path:    /path/to/language_table_root   # dir with episode_XXX/ subdirs
-#     dataset_type:     language_table
-#     img_size:         224
-#
+#     episodes_path:    /path/to/metaworld.pkl
+#     dataset_type:     pkl
 #   model:
-#     num_actions:      8       # 8 directional bins (angle-quantised)
-#     action_dim:       2       # [Δx, Δy] planar end-effector delta
-#
+#     action_dim:       4       # [Δx, Δy, Δz, gripper]
 #   vera:
-#     action_vocab:
-#       0: "I pushed the object to the right"
-#       1: "I pushed the object up and to the right"
-#       2: "I pushed the object upward"
-#       3: "I pushed the object up and to the left"
-#       4: "I pushed the object to the left"
-#       5: "I pushed the object down and to the left"
-#       6: "I pushed the object downward"
-#       7: "I pushed the object down and to the right"
+#     action_vocab:     null    # use built-in generic "I performed action N"
 #
-# To train on CALVIN, override:
+# CALVIN:
 #   data:
-#     episodes_path:    /path/to/calvin_root   # dir with training/ and validation/ subdirs
+#     episodes_path:    /path/to/calvin_root   # dir with training/ and validation/
 #     dataset_type:     calvin
 #     calvin_split:     training
-#
 #   model:
-#     num_actions:      8       # 8 dominant-axis bins (xyz roll pitch yaw + gripper open/close)
+#     num_actions:      8       # 8 dominant-axis bins (xyz roll pitch yaw + gripper)
 #     action_dim:       7       # full 7-DoF [x,y,z,roll,pitch,yaw,gripper]
+#   vera:
+#     action_vocab:     null
 #
-# Run command (either dataset):
+# Synthetic (pipeline testing only — no real robot data):
+#   data:
+#     episodes_path:    null
+#     dataset_type:     pkl
+#   model:
+#     action_dim:       4
+#   vera:
+#     action_vocab:     null
+#
+# Run command (any dataset):
 #   python -m training.sft_trainer_vera --config configs/config.yaml
