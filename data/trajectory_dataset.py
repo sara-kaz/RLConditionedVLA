@@ -88,65 +88,212 @@ def make_random_episodes(
 
 # ── Language-Table loader (Lynch et al., 2023) ────────────────────────────────
 
-def load_language_table(root: str) -> List[Dict]:
+def _lt_extract_frame(step: dict) -> Optional[np.ndarray]:
+    """
+    Try every known key/sub-key layout used by Language-Table pkl exports.
+
+    Supported layouts (in priority order):
+      step["obs"]           — numpy array (H, W, 3)          [synthetic / our format]
+      step["obs"]["rgb"]    — nested dict with rgb key
+      step["observation"]["rgb"]  — RLDS-converted pkl
+      step["observation"]["image"]
+      step["image"] / step["rgb"] / step["pixels"]  — flat
+    """
+    # 1. Direct numpy array under common top-level keys
+    for key in ("obs", "image", "rgb", "pixels", "frame"):
+        val = step.get(key)
+        if isinstance(val, np.ndarray) and val.ndim == 3:
+            return val.astype(np.uint8)
+
+    # 2. Nested dict under "obs" or "observation"
+    for top in ("obs", "observation"):
+        container = step.get(top)
+        if isinstance(container, dict):
+            for sub in ("rgb", "image", "pixels", "agentview_rgb"):
+                val = container.get(sub)
+                if isinstance(val, np.ndarray) and val.ndim == 3:
+                    return val.astype(np.uint8)
+
+    return None
+
+
+def _lt_extract_action(step: dict) -> np.ndarray:
+    """
+    Extract the 2-DoF action vector [Δx, Δy] from a step dict.
+
+    Handles:
+      step["action"]           — numpy array or list  (most formats)
+      step["action_vec"]
+      step["effector_delta"]
+    """
+    for key in ("action", "action_vec", "effector_delta", "actions"):
+        val = step.get(key)
+        if val is not None:
+            arr = np.asarray(val, dtype=np.float32).flatten()
+            if arr.size >= 2:
+                return arr[:2]
+    return np.zeros(2, dtype=np.float32)
+
+
+def _lt_extract_instruction(steps: list, ep_meta: Optional[dict] = None) -> str:
+    """
+    Extract the language instruction for an episode.
+
+    Priority:
+      1. Episode-level metadata dict (ep_meta keys: instruction, language_instruction, task)
+      2. First step with a non-empty instruction key
+      3. Fallback generic string
+    """
+    if ep_meta is not None:
+        for key in ("instruction", "language_instruction", "language", "task"):
+            val = ep_meta.get(key)
+            if val and isinstance(val, (str, bytes)):
+                return val.decode() if isinstance(val, bytes) else val
+
+    for step in steps[:5]:   # look in first 5 steps
+        for key in ("instruction", "language_instruction", "language", "task"):
+            val = step.get(key)
+            if val and isinstance(val, (str, bytes)):
+                return val.decode() if isinstance(val, bytes) else val
+
+    return "complete the task"
+
+
+def _lt_discretise(action_vec: np.ndarray, stop_thresh: float = 1e-3) -> int:
+    """
+    Discretise a 2-DoF [Δx, Δy] action into one of 8 directional bins.
+
+    Bins (arctan2 sectors of π/4 each, 0 = East/right):
+      0=right, 1=up-right, 2=up, 3=up-left,
+      4=left,  5=down-left, 6=down, 7=down-right
+
+    Near-zero actions (‖action‖ < stop_thresh) map to the closest previous
+    direction to avoid polluting the label distribution with random zeros.
+    Returns -1 for stop steps so the caller can decide to skip or keep them.
+    """
+    dx, dy = float(action_vec[0]), float(action_vec[1])
+    if abs(dx) < stop_thresh and abs(dy) < stop_thresh:
+        return -1  # stop / no-op step
+    angle = np.arctan2(dy, dx)                       # [-π, π]
+    return int(round(angle / (np.pi / 4))) % 8       # 8 equal sectors
+
+
+def inspect_language_table(root: str, n: int = 3) -> None:
+    """
+    Print the structure of the first n episodes so you can verify the format.
+    Call this once before training to confirm the loader reads your data correctly.
+    """
+    root = Path(root)
+    dirs = sorted(root.glob("episode_*"))[:n]
+    if not dirs:
+        print(f"[LT inspect] No episode_* dirs found in {root}")
+        return
+    for ep_dir in dirs:
+        sp = ep_dir / "steps.pkl"
+        if not sp.exists():
+            print(f"  {ep_dir.name}: no steps.pkl"); continue
+        steps = pickle.load(open(sp, "rb"))
+        print(f"\n{ep_dir.name}  ({len(steps)} steps)")
+        s0 = steps[0]
+        print(f"  step keys: {list(s0.keys())}")
+        for k, v in s0.items():
+            if isinstance(v, np.ndarray):
+                print(f"    {k}: ndarray shape={v.shape} dtype={v.dtype} "
+                      f"range=[{v.min():.3f}, {v.max():.3f}]")
+            elif isinstance(v, dict):
+                print(f"    {k}: dict keys={list(v.keys())}")
+                for kk, vv in v.items():
+                    if isinstance(vv, np.ndarray):
+                        print(f"      {kk}: ndarray shape={vv.shape} dtype={vv.dtype} "
+                              f"range=[{vv.min():.3f}, {vv.max():.3f}]")
+                    else:
+                        print(f"      {kk}: {type(vv).__name__} = {str(vv)[:60]}")
+            else:
+                print(f"    {k}: {type(v).__name__} = {str(v)[:60]}")
+        frame = _lt_extract_frame(s0)
+        action = _lt_extract_action(s0)
+        instr  = _lt_extract_instruction(steps)
+        print(f"  → frame  : {'OK shape=' + str(frame.shape) if frame is not None else 'NOT FOUND'}")
+        print(f"  → action : {action}  bin={_lt_discretise(action)}")
+        print(f"  → instr  : {instr[:80]}")
+
+
+def load_language_table(root: str, skip_stop_steps: bool = True) -> List[Dict]:
     """
     Load Language-Table episodes from the standard directory layout:
 
       root/
         episode_000/
-          steps.pkl   — list of step dicts: {obs, action, reward, discount}
+          steps.pkl   — list of step dicts (any of the common LT pkl formats)
         episode_001/
           ...
 
-    Action format: 2-DoF planar end-effector delta [Δx, Δy] ∈ [-1, 1]²
-    (action_dim = 2).
+    Handles all known pkl export formats from the Language-Table dataset:
+      • Our synthetic format : step["obs"] = np.array, step["instruction"]
+      • RLDS-converted pkl   : step["observation"]["rgb"], episode-level instruction
+      • Flat format          : step["rgb"] / step["image"] / step["pixels"]
 
-    If the dataset uses the RLDS / TFRecord format, convert first with:
-      pip install tensorflow tensorflow-datasets
-      tfds build language_table --data_dir ./language_table_data
+    Action format: 2-DoF planar end-effector delta [Δx, Δy].
+    Near-zero / stop steps are skipped by default (skip_stop_steps=True) to
+    prevent random-direction label noise from corrupting the discrete targets.
 
     Returns list of episode dicts compatible with TrajectoryDataset.
     """
     root = Path(root)
     episodes = []
+    n_stop_skipped = 0
 
     for ep_dir in sorted(root.glob("episode_*")):
         steps_path = ep_dir / "steps.pkl"
         if not steps_path.exists():
             continue
         with open(steps_path, "rb") as f:
-            steps = pickle.load(f)   # list of step dicts
+            raw = pickle.load(f)
+
+        # Support both list-of-steps and {steps: [...], instruction: "..."} formats
+        ep_meta = None
+        if isinstance(raw, dict):
+            ep_meta = raw
+            steps   = raw.get("steps", [])
+        elif isinstance(raw, list):
+            steps = raw
+        else:
+            continue
+
+        if not steps:
+            continue
+
+        instruction = _lt_extract_instruction(steps, ep_meta)
 
         frames      = []
         actions     = []
         rewards     = []
         action_vecs = []
-        instruction = steps[0].get("instruction", "complete the task")
 
         for step in steps:
-            obs = step.get("obs", {})
-            # RGB frame — try common key names
-            frame = obs.get("rgb", obs.get("image", obs.get("pixels", None)))
+            frame = _lt_extract_frame(step)
             if frame is None:
                 continue
 
-            action = step.get("action", np.zeros(2, dtype=np.float32))
-            action = np.asarray(action, dtype=np.float32).flatten()
+            action_vec = _lt_extract_action(step)
+            action_idx = _lt_discretise(action_vec)
 
-            # Discretise 2-DoF [Δx, Δy] continuous action into 8 directional bins:
-            #   0=right, 1=up-right, 2=up, 3=up-left,
-            #   4=left,  5=down-left, 6=down, 7=down-right
-            # Uses angle quantisation so all 8 bins are reachable.
-            if len(action) >= 2 and (action[0] != 0 or action[1] != 0):
-                angle = np.arctan2(action[1], action[0])          # [-π, π]
-                action_idx = int(round(angle / (np.pi / 4))) % 8  # 8 equal sectors
-            else:
-                action_idx = 0
+            # Skip near-zero (stop) steps — they produce random labels
+            if skip_stop_steps and action_idx == -1:
+                n_stop_skipped += 1
+                continue
+            if action_idx == -1:
+                action_idx = 0   # keep stop → default bin if user disables skip
 
-            frames.append(np.asarray(frame, dtype=np.uint8))
+            frames.append(frame)
             actions.append(action_idx)
             rewards.append(float(step.get("reward", 0.0)))
-            action_vecs.append(action[:2])   # Language-Table: 2-DoF [Δx, Δy]
+            # Normalise action_vec to [-1, 1] if needed (some exports use mm/s)
+            av = action_vec[:2].copy()
+            max_abs = np.abs(av).max()
+            if max_abs > 1.0:
+                av = av / max_abs
+            action_vecs.append(av)
 
         if len(frames) < 2:
             continue
@@ -154,11 +301,13 @@ def load_language_table(root: str) -> List[Dict]:
         episodes.append({
             "frames":         np.stack(frames),
             "instruction":    instruction,
-            "actions":        np.array(actions, dtype=np.int64),
-            "rewards":        np.array(rewards, dtype=np.float32),
+            "actions":        np.array(actions,  dtype=np.int64),
+            "rewards":        np.array(rewards,  dtype=np.float32),
             "action_vectors": np.stack(action_vecs).astype(np.float32),
         })
 
+    if n_stop_skipped:
+        print(f"[Language-Table] Skipped {n_stop_skipped} near-zero (stop) steps")
     print(f"[Language-Table] Loaded {len(episodes)} episodes from {root}")
     return episodes
 
