@@ -1,20 +1,28 @@
 %% ============================================================================
-%%  VERA: Vision-Experience-Reasoning-Action — CoRL 2025 Submission
+%%  VERA: Vision-Experience-Reasoning-Action
+%%  CoRL 2026 Camera-Ready Submission
 %%  Authors: Sara Aly
 %%
-%%  Style file: corl_2025.sty — download from the CoRL 2025 submission system
-%%  (https://corl2025.org/call-for-papers/) and place in the same directory.
+%%  Required files in the same directory as this .tex:
+%%    corl_2026.sty       — from the CoRL 2026 template package
+%%    corlabbrvnat.bst    — from the CoRL 2026 template package
+%%    references.bib      — your bibliography database
+%%    VERA.png            — architecture figure
 %% ============================================================================
 \documentclass{article}
 
-%% CoRL 2025 style (PMLR proceedings format).
-%% Options: preprint | final | accepted
-\usepackage[preprint]{corl_2025}
+%% CoRL 2026 camera-ready style.
+%%   [final]    = camera-ready: named authors + conference footer (USE FOR SUBMISSION)
+%%   [preprint] = preprint (e.g., arXiv): named authors, no footer
+%%   (none)     = blind review: anonymous + "Submitted to …" footer + line numbers
+\usepackage[final]{corl_2026}
+%% NOTE: corl_2026.sty automatically loads natbib [square,numbers],
+%%       hyperref, and geometry — do NOT load those packages again here.
 
 %% ── Encoding & fonts ─────────────────────────────────────────────────────────
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage{inconsolata}
+%% (The style sets Times Roman as the main font via \rmdefault=ptm.)
 
 %% ── Math ─────────────────────────────────────────────────────────────────────
 \usepackage{amsmath,amssymb,amsfonts,mathtools,amsthm}
@@ -33,20 +41,9 @@
 
 %% ── Colour ───────────────────────────────────────────────────────────────────
 \usepackage{xcolor}
-\definecolor{uclablue}{rgb}{0.15,0.45,0.68}
+\definecolor{NewOrange}{HTML}{E67E22}
 \definecolor{CodeBg}{HTML}{F8F9FA}
 \definecolor{BorderGray}{HTML}{D1D5DB}
-\definecolor{NewOrange}{HTML}{E67E22}
-
-%% ── Hyperlinks ───────────────────────────────────────────────────────────────
-\usepackage{hyperref,url}
-\hypersetup{breaklinks,colorlinks,
-  citecolor=uclablue,linkcolor=uclablue,urlcolor=uclablue}
-
-%% ── References & cross-refs ──────────────────────────────────────────────────
-%% CoRL uses natbib with author–year citations (abbrvnat style).
-\usepackage{natbib}
-\usepackage[capitalize,noabbrev]{cleveref}
 
 %% ── Listings ─────────────────────────────────────────────────────────────────
 \usepackage{listings,pifont}
@@ -59,6 +56,17 @@
 }
 \lstset{style=mycode}
 
+%% ── Cross-references (must come after hyperref, which corl_2026 loads) ───────
+\usepackage[capitalize,noabbrev]{cleveref}
+
+%% ── PDF metadata ─────────────────────────────────────────────────────────────
+%% The pdftitle MUST match the title on the OpenReview submission form.
+\hypersetup{
+  pdftitle  = {VERA: Closed-Loop Feedback for Grounded Vision-Action Policies
+               via Experience and Reasoning},
+  pdfauthor = {Sara Aly},
+}
+
 %% ── Macros ───────────────────────────────────────────────────────────────────
 \newcommand{\cmark}{\ding{51}}
 \newcommand{\xmark}{\ding{55}}
@@ -68,17 +76,21 @@
 \newcommand{\Lcon}{\Lexp}
 \newcommand{\NEW}{\textcolor{NewOrange}{\textbf{[new]}}\xspace}
 \newcommand{\tbd}{\textit{---}\xspace}
-\newcommand{\veraresult}[2]{$#1\,{\pm}\,#2$}  %% e.g. \veraresult{51.4}{1.9}
+\newcommand{\veraresult}[2]{$#1\,{\pm}\,#2$}
 
 %% ============================================================================
-\title{\textbf{VERA}: Closed-Loop Feedback for\\
-       Grounded Vision-Action Policies via Experience and Reasoning}
+%%  Title — must match OpenReview exactly (same string as pdftitle above)
+%% ============================================================================
+\title{VERA: Closed-Loop Feedback for Grounded Vision-Action Policies
+       via Experience and Reasoning}
 
-%% CoRL / PMLR author block.
-%% Use \Name{}, \Email{}, and \addr (no backslash) macros provided by corl_2025.sty.
+%% Authors — non-anonymous; visible because [final] is active.
 \author{
-  \Name{Sara Aly} \Email{sarakhaledsea@gmail.com}\\
-  \addr Department of Computer Science, California State University, Northridge
+  Sara Aly\\
+  Department of Computer Science\\
+  California State University, Northridge\\
+  United States\\
+  \texttt{sarakhaledsea@gmail.com}
 }
 
 \begin{document}
@@ -122,6 +134,10 @@ the critical no-language-feedback ablation is in progress on both
 Language-Table and CALVIN D$\to$D~\citep{mees2022calvin}, with the
 full nine-variant ablation study spanning both environments.
 \end{abstract}
+
+%% Two or three meaningful keywords
+\keywords{Vision-Language-Action Models, Closed-Loop Robot Control,
+          Behavioural Cloning, Language Grounding, Robot Manipulation}
 
 %% ============================================================================
 \section{Introduction}
@@ -168,7 +184,8 @@ We introduce two complementary feedback tokens (Figure~\ref{fig:arch}):
   Reasoning Transformer with ViLT modality-type embeddings (\S\ref{sec:model}).
 \item \textbf{Rich experience verbalization}: \texttt{verbalize\_consequence()}
   maps scalar reward $+$ $\Delta d$ to up to 16 semantically distinct
-  CLIP-compatible strings, requiring zero additional pretraining (\S\ref{sec:experience}).
+  CLIP-compatible strings, requiring zero additional pretraining
+  (\S\ref{sec:experience}).
 \item \textbf{Dual action head}: a parallel continuous regression head
   co-trained with MSE enables end-effector command prediction alongside the
   discrete policy (\S\ref{sec:model}).
@@ -184,13 +201,13 @@ We introduce two complementary feedback tokens (Figure~\ref{fig:arch}):
 \label{sec:related}
 
 \paragraph{Vision-Language-Action Models.}
-RT-2~\citep{brohan2023rt2}, Octo~\citep{octo2024}, OpenVLA~\citep{kim2024openvla},
-and $\pi_0$~\citep{black2024pi0} are stateless at inference.
+\citet{brohan2023rt2}, \citet{octo2024}, \citet{kim2024openvla},
+and \citet{black2024pi0} are stateless at inference.
 None closes the experience--reasoning feedback loop.
 
 \paragraph{$\pi_{0.5}$ and open-world generalisation.}
-$\pi_{0.5}$~\citep{hejna2025pi05} encodes prior actions autoregressively
-but carries \textbf{no signal for whether they succeeded}.
+\citet{hejna2025pi05} encode prior actions autoregressively
+but carry \textbf{no signal for whether they succeeded}.
 \modelname\ addresses this directly with Stream~3b and the reward gate.
 Furthermore, $\pi_{0.5}$ operates at PoliGemma scale;
 \modelname\ achieves closed-loop feedback with only ${\approx}4$M
@@ -205,7 +222,7 @@ signal or spatial outcome.
 \modelname\ makes consequence explicit and reward-aware, and
 encodes the full low-level continuous action vector in Stream~4.
 
-\paragraph{Sequence Models for RL.}
+\paragraph{Sequence models for RL.}
 Decision Transformer~\citep{chen2021decision} and Gato~\citep{reed2022gato}
 encode history numerically; we encode it as language.
 
@@ -246,13 +263,13 @@ Transformer encoder~\citep{vaswani2017attention}.
   \centering
   \includegraphics[width=\linewidth]{VERA.png}
   \caption{\textbf{\modelname\ architecture.}
-    Five streams are encoded by the frozen CLIP backbone (vision + three language streams)
-    or a dedicated history encoder, projected to $d{=}256$, assembled as an 11-token
-    sequence, and fused by a LLaMA-style causal Transformer.
-    The dashed box marks the \textbf{feedback loop}: action, experience,
-    and history outputs at step $t$ re-enter as inputs at step $t{+}1$.
-    Novel components highlighted in orange: \Lexp\ (Stream~3b),
-    the reward gate on \Lact, and the continuous regression head.}
+    Five streams are encoded by the frozen CLIP backbone (vision + three language
+    streams) or a dedicated history encoder, projected to $d{=}256$, assembled as an
+    11-token sequence, and fused by a LLaMA-style causal Transformer.
+    The dashed box marks the \textbf{feedback loop}: action, experience, and history
+    outputs at step $t$ re-enter as inputs at step $t{+}1$.
+    Novel components highlighted in orange: \Lexp\ (Stream~3b), the reward gate on
+    \Lact, and the continuous regression head.}
   \label{fig:arch}
 \end{figure}
 
@@ -277,7 +294,6 @@ Each stream has an independent trainable projection:
 
 \subsection{Experience Encoder (Stream~3b)}
 \label{sec:experience}
-\label{sec:consequence}
 
 \paragraph{Verbalization.}
 \begin{equation}
@@ -377,7 +393,7 @@ $d_{\mathrm{act}}\!\in\!\{2,4,7\}$ for Language-Table, MetaWorld, CALVIN.
     \mathrm{InfoNCE}(\mathbf{e}_2,\,\mathbf{e}_{3a},\,r)
     + \mathrm{InfoNCE}(\mathbf{e}_2,\,\mathbf{e}_{3b},\,r)
   \bigr],
-  \quad
+  \;\;
   \mathrm{InfoNCE}(\mathbf{e}_q,\mathbf{e}_k,r)
   = -\frac{1}{B}\sum_{i}r_i\cdot
     \log\frac{e^{\mathbf{e}_q^{(i)}\cdot\mathbf{e}_k^{(i)}/\tau}}
@@ -387,7 +403,7 @@ Total SFT loss: $\mathcal{L}_{\mathrm{SFT}}
   = \mathcal{L}_{\mathrm{BC}} + 0.1\,\mathcal{L}_{\mathrm{align}}
   + 0.5\,\mathcal{L}_{\mathrm{reg}}$.
 
-\subsection{Critical Bug: CLS Token Isolation}
+\subsection{Critical Bug Fix: CLS Token Isolation}
 \label{sec:bug}
 Under a causal mask, position~$i$ attends only to positions $j{\le}i$.
 The original CLS at position~0 attends only to itself across all 6 layers;
@@ -454,7 +470,7 @@ natural-language instructions (e.g.\ \textit{``push the star near the moon''}).
 Actions are 2-DoF end-effector displacements $\mathbf{v}\!\in\![-1,1]^2$.
 We discretize into an \textbf{8-bin vocabulary}
 ($x{+}$, $x{-}$, $y{+}$, $y{-}$, combined diagonals, stop)
-and an 80/20 random split provides train/validation splits.
+and use an 80/20 random split for train/validation.
 Language-Table serves as our \textbf{primary evaluation environment}:
 completed results are reported in Table~\ref{tab:lt_results}.
 
@@ -467,7 +483,7 @@ vocabulary}: positive/negative direction for each of $x, y, z$, roll, pitch, yaw
 plus gripper open/close.
 The regression branch predicts the full 7-DoF vector
 $\mathbf{v}\!\in\![-1,1]^7$.
-The full 9-variant ablation study is being conducted on CALVIN D$\to$D
+The full 9-variant ablation study is conducted on CALVIN D$\to$D
 in parallel with Language-Table (Section~\ref{sec:ablation_status}).
 
 \paragraph{BabyAI/MiniGrid~\citep{chevalier2019babyai,minigrid} and
@@ -686,8 +702,8 @@ DT~\citep{chen2021decision}    & ${\sim}$50M & ${\sim}$50M & ${\sim}5$\,GFLOPs &
 
 \noindent\textbf{Key efficiency observation.}
 \modelname\ achieves closed-loop language feedback with only 4.25M trainable
-parameters --- $22\times$ fewer than Octo (93M), $1,760\times$ fewer than
-OpenVLA (7.5B), and $12,900\times$ fewer than RT-2 (55B).
+parameters --- $22\times$ fewer than Octo (93M), $1{,}760\times$ fewer than
+OpenVLA (7.5B), and $12{,}900\times$ fewer than RT-2 (55B).
 The trainable inference path (${\approx}0.12$\,GFLOPs) is three orders of
 magnitude cheaper than RT-2 and fits entirely on a single 8\,GB GPU.
 Total per-step cost (${\approx}31$\,GFLOPs) is comparable to Octo while
@@ -721,9 +737,10 @@ baselines leave open.
 A learned verbalizer could capture finer distinctions at higher compute cost.
 
 \textbf{Results pending.}
-Table~\ref{tab:lt_results} contains one pending row (no-language-feedback on Language-Table);
-Table~\ref{tab:ablations} reports one completed column (Language-Table: Full VERA and BC)
-with all CALVIN D$\to$D entries and remaining ablations in progress.
+Table~\ref{tab:lt_results} contains one pending row (no-language-feedback on
+Language-Table); Table~\ref{tab:ablations} reports one completed column
+(Language-Table: Full VERA and BC) with all CALVIN D$\to$D entries and
+remaining ablations in progress.
 The no-language-feedback results on both environments will be ready within
 48~hours of submission.
 
@@ -747,10 +764,20 @@ Adversarial reward manipulation could theoretically exploit the reward gate,
 though this requires physical access to the reward channel and is partially
 mitigated by sigmoid clamping.
 
-%% ── References ───────────────────────────────────────────────────────────────
-\bibliography{references}
-\bibliographystyle{abbrvnat}    %% CoRL uses author–year (abbrvnat), not plain
+%% ── Acknowledgments ──────────────────────────────────────────────────────────
+%% This section is only rendered with the [final] or [preprint] options.
+\clearpage
+\acknowledgments{
+The author thanks Dr.\ Shahnam Mirzaei (California State University, Northridge)
+for guidance and support throughout this project.
+Experiments were conducted using Google Colaboratory (NVIDIA T4 / A100 GPUs).
+}
 
+%% ── References ───────────────────────────────────────────────────────────────
+%% No \bibliographystyle needed — corl_2026.sty automatically uses corlabbrvnat.bst
+\bibliography{references}
+
+%% ── Appendix (optional, no page limit beyond the 9-page main text) ───────────
 \clearpage
 \appendix
 
@@ -830,7 +857,7 @@ Value loss coef         & 0.5   & \\
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{L{4cm}L{8.5cm}}
+\begin{tabular}{L{4cm}L{8cm}}
 \toprule
 \textbf{Alternative} & \textbf{Reason for rejection} \\
 \midrule
