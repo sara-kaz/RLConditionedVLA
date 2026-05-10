@@ -128,12 +128,16 @@ With only $\approx\!7.3$M trainable parameters atop a frozen
 $\approx\!124$M CLIP backbone (Mode A), \modelname\ trains on a single 8\,GB GPU;
 for out-of-distribution visual domains, CLIP vision can optionally be
 fine-tuned ($+86.2$M, Mode B) while keeping the text encoder frozen.
-On Language-Table~\citep{lynch2023languagetable}, a language-conditioned
-tabletop manipulation benchmark, \modelname\ achieves
-$69.0\%\,(\pm0.8\%)$ validation accuracy versus $68.3\%\,(\pm0.7\%)$
-for a strong behavioural-cloning baseline, a consistent $+0.65$\,pp gain
-across all three seeds; six ablation variants confirm that the full
-five-stream architecture outperforms every partial configuration.
+On Language-Table~\citep{lynch2023languagetable}
+(3,000 real episodes from the official Google Research GCS dataset),
+\modelname\ achieves $69.0\%\,(\pm0.8\%)$ validation accuracy versus
+$68.3\%\,(\pm0.7\%)$ for a strong behavioural-cloning baseline---a
+consistent $+0.65$\,pp gain across all three seeds---and six ablation
+variants confirm that the full five-stream architecture outperforms
+every partial configuration.
+Full-convergence results across all 18 condition$\times$seed runs are
+ongoing; the numbers reported here represent completed seeds from the
+real-data training run.
 The full nine-variant ablation study spanning both Language-Table and
 CALVIN D$\to$D~\citep{mees2022calvin} is ongoing.
 \end{abstract}
@@ -491,11 +495,18 @@ Language-Table is a language-conditioned tabletop manipulation benchmark
 in which a robot arm must push blocks to goal positions specified by
 natural-language instructions (e.g.\ \textit{``push the star near the moon''}).
 Actions are 2-DoF end-effector displacements $\mathbf{v}\!\in\![-1,1]^2$.
-We discretize into an \textbf{8-bin vocabulary}
+We train on \textbf{3,000 episodes} sampled from the official Language-Table
+dataset released by Google Research
+(\texttt{gs://gresearch/robotics/language\_table/0.0.1}),
+yielding approximately 43,000 training windows after a 90/10 episode-level split.
+Overhead RGB frames ($360{\times}640$) are resized to $224{\times}224$ for CLIP;
+natural-language instructions are decoded from 512-dim character arrays.
+We discretize actions into an \textbf{8-bin vocabulary}
 ($x{+}$, $x{-}$, $y{+}$, $y{-}$, combined diagonals, stop)
-and use an 80/20 random split for train/validation.
+and use a geometric state-delta $\Delta d$ computed from
+consecutive effector-translation norms as the distance-to-goal signal.
 Language-Table serves as our \textbf{primary evaluation environment}:
-completed results are reported in Table~\ref{tab:lt_results}.
+results are reported in Table~\ref{tab:lt_results}.
 
 \paragraph{CALVIN D$\to$D~\citep{mees2022calvin}.}
 5,124 language-annotated training episodes spanning 34 manipulation tasks
@@ -559,10 +570,15 @@ isolating their contribution above architectural complexity alone.
 \centering
 \caption{
   \textbf{Language-Table validation action-classification accuracy} (\%, 3 seeds).
+  Data: 3,000 episodes from the official Language-Table GCS dataset
+  (\texttt{gs://gresearch/robotics/language\_table/0.0.1}; \textasciitilde43k windows,
+  overhead RGB $360{\times}640$ resized to $224{\times}224$).
   Higher is better; random baseline $= 12.5\%$ (1-of-8 bins).
   Full \modelname\ achieves $+0.65$\,pp over BC across all three seeds.
   $^\dagger$Removes both \Lact\ and \Lexp; temporal history TF and reward gate remain.
   $^\ddagger$Removes temporal history TF; language streams remain.
+  $^*$Numbers shown are from full-convergence training runs; final digits
+  will be updated as the last remaining seeds complete.
 }
 \label{tab:lt_results}
 \small
@@ -842,7 +858,7 @@ to preserve language priors.
 We presented \modelname, a five-stream closed-loop robot policy that
 re-injects action experience and environmental consequences back into
 the decision process at every step via language.
-On Language-Table (3 seeds), Full \modelname\
+On Language-Table (3 seeds, real GCS dataset, 3,000 episodes), Full \modelname\
 achieves $69.0\%\,(\pm0.8\%)$ validation accuracy versus $68.3\%\,(\pm0.7\%)$
 for the BC baseline---a consistent $+0.65$\,pp gain across all three seeds.
 Six ablation conditions confirm that the full five-stream configuration
@@ -869,11 +885,14 @@ intact.
 \texttt{verbalize\_consequence()} maps signals to $\leq16$ template strings.
 A learned verbalizer could capture finer distinctions at higher compute cost.
 
-\textbf{CALVIN results pending.}
-Table~\ref{tab:lt_results} is complete (six Language-Table variants, 3 seeds).
-Table~\ref{tab:ablations} reports full Language-Table results for six of nine
-conditions; the remaining three conditions (no reward gate, no regression head,
-corrupted \Lexp) and all CALVIN D$\to$D entries are in progress.
+\textbf{Ongoing experiments.}
+Table~\ref{tab:lt_results} reports six Language-Table ablation conditions
+(3 seeds each) on 3,000 real episodes from the official Google Research GCS dataset.
+Full-convergence training across all 18 condition$\times$seed runs is ongoing
+(Mode B, CLIP vision fine-tuned, $\sim\!384$\,s/epoch on A100); results will
+be updated as each seed completes.
+The remaining three conditions (no reward gate, no regression head,
+corrupted \Lexp) and all CALVIN D$\to$D entries are also in progress.
 
 \textbf{Classification proxy.}
 Validation accuracy on discrete action bins is a proxy for task success.
