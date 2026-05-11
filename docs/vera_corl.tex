@@ -119,11 +119,19 @@ indices, and rewards forms a fifth history stream processed by a
 dedicated temporal transformer.
 A parallel continuous regression head co-trained with MSE enables
 direct end-effector command prediction alongside the discrete policy.
-All five streams are fused by a six-layer LLaMA-style causal
-Transformer (RMSNorm + RoPE + SwiGLU) augmented with ViLT
-modality-type embeddings.
-An auxiliary reward-weighted InfoNCE loss aligns successful experience
-embeddings toward the goal instruction during training.
+All five streams are fused by a six-layer LLaMA-style
+\emph{bidirectional} Transformer (RMSNorm + RoPE + SwiGLU) augmented
+with ViLT modality-type embeddings; removing the causal mask allows the
+action-narration and experience tokens to attend to the full visual
+context---a critical correction for offline behavioural cloning.
+An expand-compress action head (CoT-lite bottleneck, inspired by
+VITA-VLA) combined with $K{=}4$ action chunking ($\pi_0$/GR-1 style)
+predicts a window of four consecutive discrete actions from a single CLS
+token, yielding $4{\times}$ the supervised signal per step while
+enforcing temporal consistency.
+An auxiliary reward-weighted InfoNCE loss---with exponential reward
+weighting $\exp(5r)$ and per-batch normalisation---aligns successful
+experience embeddings toward the goal instruction during training.
 With only $\approx\!7.3$M trainable parameters atop a frozen
 $\approx\!124$M CLIP backbone (Mode A), \modelname\ trains on a single 8\,GB GPU;
 for out-of-distribution visual domains, CLIP vision can optionally be
@@ -199,8 +207,14 @@ We introduce two complementary feedback tokens (Figure~\ref{fig:arch}):
 \item \textbf{Reward-weighted InfoNCE alignment}: auxiliary contrastive loss
   that teaches the fusion space which past actions are worth repeating
   (\S\ref{sec:alignment}).
-\item \textbf{Causal-mask CLS placement}: we identify and fix a latent
-  design error common to causal-mask VLA implementations (\S\ref{sec:bug}).
+\item \textbf{Bidirectional attention and CLS placement}: we identify and
+  fix two latent design errors that together caused the feedback tokens to
+  be blind to the visual scene; switching to bidirectional attention and
+  placing CLS last are both required (\S\ref{sec:bug}).
+\item \textbf{Action chunking with CoT-lite head} ($K{=}4$, $\pi_0$/GR-1
+  style): an expand-compress bottleneck head that forces an intermediate
+  plan representation before predicting $K$ consecutive actions, giving
+  $4{\times}$ supervision and enforcing temporal consistency (\S\ref{sec:model}).
 \end{enumerate}
 
 %% ============================================================================
@@ -239,6 +253,16 @@ planning or reward shaping.
 We differ: language is the \emph{input encoding} of past experience at
 every step.
 
+\paragraph{Action chunking.}
+$\pi_0$~\citep{black2024pi0} and GR-1~\citep{wu2023gr1} predict a window of $K$
+future actions from a single observation token, executing only the first.
+We adopt this principle for our discrete 8-bin policy ($K{=}4$) and pair it
+with an expand-compress bottleneck head inspired by VITA-VLA's
+Action Chain-of-Thought~\citep{vitavla2024}, which forces an implicit plan
+representation before the final logits.
+Unlike those works, we combine chunking with the closed-loop language-feedback
+mechanism so the temporal window is informed by consequence and experience tokens.
+
 \paragraph{Contrastive alignment.}
 CLIP~\citep{radford2021clip} and ViLT~\citep{kim2021vilt} inspire our
 per-token modality-type embeddings and reward-weighted InfoNCE auxiliary loss.
@@ -272,11 +296,13 @@ Transformer encoder~\citep{vaswani2017attention}.
   \caption{\textbf{\modelname\ architecture.}
     Five streams are encoded by the frozen CLIP backbone (vision + three language
     streams) or a dedicated history encoder, projected to $d{=}256$, assembled as an
-    11-token sequence, and fused by a LLaMA-style causal Transformer.
+    11-token sequence, and fused by a LLaMA-style \emph{bidirectional} Transformer
+    (no causal mask).
     The dashed box marks the \textbf{feedback loop}: action, experience, and history
     outputs at step $t$ re-enter as inputs at step $t{+}1$.
     Novel components highlighted in orange: \Lexp\ (Stream~3b), the reward gate on
-    \Lact, and the continuous regression head.}
+    \Lact, the expand-compress CoT-lite action head with $K{=}4$ chunking, and the
+    continuous regression head.}
   \label{fig:arch}
 \end{figure}
 
@@ -377,19 +403,75 @@ history (3), experience (4).
 \begin{equation}
   \mathbf{X}^{(\ell+1)}
   = \mathbf{X}^{(\ell)}
-  + \mathrm{MHA}_{\mathrm{RoPE}}\!\left(\mathrm{RMSNorm}(\mathbf{X}^{(\ell)}),\,\mathbf{M}\right)
+  + \mathrm{MHA}_{\mathrm{RoPE}}\!\left(\mathrm{RMSNorm}(\mathbf{X}^{(\ell)})\right)
   + \mathrm{SwiGLU}\!\left(\mathrm{RMSNorm}(\mathbf{X}^{(\ell)})\right)
   \label{eq:llama}
 \end{equation}
-Six decoder blocks; causal mask $\mathbf{M}$; CLS at last position attends
-to all 10 preceding tokens.
+
+\paragraph{Bidirectional (full) attention.}
+VERA uses \emph{no causal mask} in the main fusion transformer.
+All 11 tokens attend to each other in every layer.
+This is critical for correctness: VERA is a behavioural-cloning policy, not
+an autoregressive token generator.
+Under a causal mask, the action-narration token $E_{\mathrm{act}}$ (position~1) and
+experience token $E_{\mathrm{exp}}$ (position~2) can only attend to the instruction
+(position~0)---they are entirely blind to the three vision tokens ($V_1, V_2, V_3$)
+and four history tokens ($H_1$--$H_4$).
+This defeats the purpose of Streams~3a and~3b: feedback tokens that cannot
+see the current visual scene cannot adapt the policy to the observed state.
+
+\paragraph{Temporal ordering preserved separately.}
+The TemporalHistoryTransformer (Stream~4) retains its own causal mask
+internally, preserving the oldest-to-newest temporal ordering of the
+$(a, \mathbf{v}, r)$ history tuples \emph{before} they enter the main
+bidirectional stack.
+The main fusion transformer therefore sees temporally-encoded history tokens
+and does not require a sequential ordering constraint itself.
 
 \subsection{Dual Action Head}
-\paragraph{Discrete classifier.}
+
+\paragraph{Discrete classifier — expand-compress bottleneck (CoT-lite) \NEW.}
+Inspired by VITA-VLA's Action Chain-of-Thought~\citep{vitavla2024},
+the head uses an expand-then-compress architecture that forces an
+intermediate ``plan'' representation before producing final logits.
+The CLS feature $\mathbf{c}'\!\in\!\mathbb{R}^d$ is first expanded to $2d$
+(creating headroom for implicit planning) and then compressed back to $d$
+(crystallising the reasoned state):
+\begin{align}
+  \mathbf{p} &= \mathrm{RMSNorm}\!\left(
+    W_{\mathrm{comp}}\,\mathrm{SiLU}\!\left(
+      \mathrm{RMSNorm}\!\left(
+        W_{\mathrm{exp}}\,\mathrm{RMSNorm}(\mathbf{c}')
+      \right)
+    \right)
+  \right) \in\mathbb{R}^d
+  \label{eq:bottleneck}
+\end{align}
+where $W_{\mathrm{exp}}\!\in\!\mathbb{R}^{2d\times d}$ and
+$W_{\mathrm{comp}}\!\in\!\mathbb{R}^{d\times 2d}$.
+
+\paragraph{Action chunking (\boldmath$K\!=\!4$, $\pi_0$/GR-1 style) \NEW.}
+Rather than predicting one action per forward pass, the head outputs a
+window of $K{=}4$ consecutive discrete actions from the single CLS token:
 \begin{equation}
-  \hat{\mathbf{y}} = W_3\,\mathrm{SiLU}(W_2\,\mathrm{SiLU}(W_1\,\mathrm{RMSNorm}(\mathbf{c}')))
-  \;\in\mathbb{R}^N
+  \bigl[\hat{\mathbf{y}}^{(1)},\ldots,\hat{\mathbf{y}}^{(K)}\bigr]
+  = \bigl[W_{\mathrm{out}}\,\mathbf{p}\bigr]
+    \;\in\mathbb{R}^{K\times N}
+  \label{eq:chunk_logits}
 \end{equation}
+Only $\hat{\mathbf{y}}^{(1)}$ (step $t$) is \emph{executed} at inference.
+Training minimises cross-entropy averaged over all $K$ steps:
+\begin{equation}
+  \mathcal{L}_{\mathrm{BC}}
+  = \frac{1}{K}\sum_{k=1}^{K}
+    \mathrm{CE}\!\bigl(\hat{\mathbf{y}}^{(k)},\,a_{t+k-1}\bigr)
+  \label{eq:chunk_ce}
+\end{equation}
+This provides $K\!=\!4\times$ the supervised signal per observation
+compared to single-step BC, and enforces temporal consistency:
+the model must predict a plausible short action \emph{sequence},
+not just the next bin.
+Steps beyond episode boundaries are padded by repeating the final action.
 
 \paragraph{Continuous regression head \NEW.}
 \begin{equation}
@@ -400,32 +482,112 @@ $d_{\mathrm{act}}\!\in\!\{2,4,7\}$ for Language-Table, MetaWorld, CALVIN.
 
 \subsection{Reward-Weighted InfoNCE Alignment Loss}
 \label{sec:alignment}
+
+\paragraph{Per-batch reward normalisation.}
+Before the alignment loss and the reward gate are evaluated, per-batch
+normalisation maps the raw reward history to $[0,1]$:
+\begin{equation}
+  \tilde{r}_i = \frac{r_i}{\max_j r_j + \varepsilon}, \quad \varepsilon=10^{-6}
+  \label{eq:batch_norm}
+\end{equation}
+This ensures a discriminative dynamic range across batches regardless of the
+reward scale of the underlying dataset (Language-Table rewards $\in[0,0.2]$;
+CALVIN binary rewards $\in\{0,1\}$).
+
+\paragraph{Exponential reward weighting.}
+Normalised rewards $\tilde{r}\in[0,1]$ are then passed through an
+exponential weight $w_i = \exp(5\tilde{r}_i)$, normalised over the batch:
+\begin{equation}
+  w_i = \frac{\exp(5\tilde{r}_i)}{\sum_j \exp(5\tilde{r}_j)}
+  \label{eq:exp_weight}
+\end{equation}
+This gives high-reward steps $\approx\!148{\times}$ more alignment pull
+than zero-reward steps ($e^5/e^0$), versus only $1.15{\times}$ with the
+na\"ive $\mathrm{softplus}(r)$ weighting used for raw LT rewards
+$r\!\in\![0,0.2]$.
+
+\paragraph{Symmetric InfoNCE.}
 \begin{equation}
   \mathcal{L}_{\mathrm{align}}
   = \tfrac{1}{2}\bigl[
-    \mathrm{InfoNCE}(\mathbf{e}_2,\,\mathbf{e}_{3a},\,r)
-    + \mathrm{InfoNCE}(\mathbf{e}_2,\,\mathbf{e}_{3b},\,r)
+    \mathcal{L}_{\mathrm{act}}
+    + \mathcal{L}_{\mathrm{exp}}
   \bigr],
-  \;\;
-  \mathrm{InfoNCE}(\mathbf{e}_q,\mathbf{e}_k,r)
-  = -\frac{1}{B}\sum_{i}r_i\cdot
-    \log\frac{e^{\mathbf{e}_q^{(i)}\cdot\mathbf{e}_k^{(i)}/\tau}}
-             {\sum_{j}e^{\mathbf{e}_q^{(i)}\cdot\mathbf{e}_k^{(j)}/\tau}}
+  \quad
+  \mathcal{L}_{*}
+  = \sum_{i} w_i \cdot
+    \frac{1}{2}\Bigl[
+      \mathrm{CE}_i\!\left(\frac{\mathbf{e}_2\,\mathbf{e}_{*}^{\top}}{\tau}\right)
+    + \mathrm{CE}_i\!\left(\frac{\mathbf{e}_{*}\,\mathbf{e}_2^{\top}}{\tau}\right)
+    \Bigr]
+  \label{eq:infonce}
 \end{equation}
-Total SFT loss: $\mathcal{L}_{\mathrm{SFT}}
-  = \mathcal{L}_{\mathrm{BC}} + 0.15\,\mathcal{L}_{\mathrm{align}}
-  + 0.5\,\mathcal{L}_{\mathrm{reg}}$.
-The higher coefficient (0.15 vs the generic 0.1) is justified by the rich
-diversity of \Lexp\ strings now available with real shaped rewards and
-pseudo-$\Delta d$: empirically, 0.15 aligns the consequence stream faster
-without destabilising cross-entropy.
+where $\tau$ is a learned temperature initialised to $0.10$ and clamped to
+$[0.05, 1.0]$, and $\mathrm{CE}_i$ denotes cross-entropy for the $i$-th
+sample against diagonal (matching) labels.
+Embeddings $\mathbf{e}_2,\mathbf{e}_{3a},\mathbf{e}_{3b}$ are the
+\emph{projected} $d_{\mathrm{model}}$-dim outputs of the trainable
+RMSNorm+Linear heads---gradient flows through the projection matrices
+even though the CLIP backbone is frozen.
 
-\subsection{Critical Bug Fix: CLS Token Isolation}
+\paragraph{Reward gate calibration.}
+The reward gate in Stream~3a scales the normalised reward by $\gamma_g{=}6.0$
+before the sigmoid MLP, so $\sigma(\mathrm{MLP}(\gamma_g \tilde{r}))$ spans
+the full dynamic range $[0.50,\,0.998]$ for $\tilde{r}\!\in\![0,1]$,
+versus the nearly-constant $\approx 0.50$ produced by raw LT rewards without
+scaling.
+
+\paragraph{Total SFT loss.}
+\begin{equation}
+  \mathcal{L}_{\mathrm{SFT}}
+  = \mathcal{L}_{\mathrm{BC}}
+  + \underbrace{1.0}_{\lambda_{\mathrm{align}}}\,\mathcal{L}_{\mathrm{align}}
+  + \underbrace{0.5}_{\lambda_{\mathrm{reg}}}\,\mathcal{L}_{\mathrm{reg}}
+  \label{eq:sft_loss}
+\end{equation}
+The alignment coefficient $\lambda_{\mathrm{align}}{=}1.0$ (raised from the
+initial 0.15) is necessary because Mode B training introduces 86M additional
+CLIP-vision parameters whose gradient magnitude dominates at 0.15; at 1.0,
+the alignment term contributes on par with the BC term and the projection
+layers receive meaningful gradient signal.
+
+\subsection{Design Corrections: Causal Mask and CLS Placement}
 \label{sec:bug}
-Under a causal mask, position~$i$ attends only to positions $j{\le}i$.
-The original CLS at position~0 attends only to itself across all 6 layers;
-the entire CLIP encoding is ignored.
-Fix: place CLS last so it attends to all 10 preceding tokens.
+
+Two latent design errors in a naive causal-mask implementation together
+cause the feedback tokens to be entirely uninformative.
+
+\paragraph{Error~1 — Causal mask inappropriate for BC.}
+Under a causal mask, token at position~$i$ can only attend to
+positions $j\!\le\!i$.
+In VERA's token order
+$[\ell,\,E_{\mathrm{act}},\,E_{\mathrm{exp}},\,V_1,V_2,V_3,\,H_1\ldots H_4,\,\mathrm{CLS}]$,
+the action-narration token $E_{\mathrm{act}}$ (pos~1) can only attend to
+the instruction $\ell$ (pos~0), and the experience token $E_{\mathrm{exp}}$
+(pos~2) can only attend to $\ell$ and $E_{\mathrm{act}}$.
+Both feedback tokens are completely blind to the visual scene and history.
+This is fatal for their purpose as closed-loop signals.
+\emph{Fix}: remove the causal mask entirely.
+VERA is a BC policy; it classifies the current action from a fixed context
+window---no autoregressive generation is involved.
+Bidirectional attention lets every token, including $E_{\mathrm{act}}$ and
+$E_{\mathrm{exp}}$, attend to the full 11-token sequence.
+
+\paragraph{Error~2 — CLS at position~0 with causal mask.}
+If CLS is placed \emph{first} (position~0) under a causal mask,
+it attends only to itself in every layer---the entire CLIP encoding
+is invisible to the aggregation token.
+\emph{Fix}: place CLS \emph{last} (position~10) so it attends to all
+preceding tokens.
+With bidirectional attention this placement is not strictly necessary, but
+it preserves the CLS-as-summary semantics used in BERT-style encoders and
+avoids confusion if a future ablation re-introduces positional asymmetry.
+
+\paragraph{Combined effect.}
+These two fixes together ensure that every token is fully informed by
+the entire context before CLS aggregates for the action head---the
+prerequisite for the language-alignment loss and reward gate to
+carry useful gradient signal.
 
 \paragraph{Parameter count.}
 \begin{table}[h]
@@ -450,12 +612,12 @@ ViLT modality-type embeddings (5 types)  & 1,280            & Yes & Yes \\
 History Encoder (embed + 3 projections + fusion MLP) & ${\approx}$200K & Yes & Yes \\
 History Temporal Sub-Transformer (2L, 4H, $d{=}256$) & ${\approx}$1.6M & Yes & Yes \\
 LLaMA Fusion Transformer (6L, 8H, $d{=}256$, $d_{\mathrm{ff}}{=}704$) & ${\approx}$4.8M & Yes & Yes \\
-Discrete Action Head (3-layer MLP)        & ${\approx}$100K  & Yes & Yes \\
+Discrete Action Head (expand-compress CoT-lite, $K{=}4$ chunking) & ${\approx}$340K  & Yes & Yes \\
 Continuous Regression Head \NEW           & ${\approx}$33K   & Yes & Yes \\
 CLS token                                 & 256              & Yes & Yes \\
 \midrule
-\textbf{Total trainable (Mode A)}        & ${\approx}$\textbf{7.3M}  & & \\
-\textbf{Total trainable (Mode B)}        & ${\approx}$\textbf{93.5M} & & \\
+\textbf{Total trainable (Mode A)}        & ${\approx}$\textbf{7.5M}  & & \\
+\textbf{Total trainable (Mode B)}        & ${\approx}$\textbf{93.7M} & & \\
 \textbf{Total parameters}               & ${\approx}$\textbf{131M}  & & \\
 \bottomrule
 \end{tabular}
@@ -867,6 +1029,21 @@ outperforms every partial variant, and that the two language-alignment streams
 recovers $68.5$--$68.6\%$, while their combination yields the full improvement.
 The no-language-feedback and per-stream ablations on CALVIN D$\to$D
 (34 manipulation tasks, 7-DoF) are in progress.
+Three architectural improvements---motivated by an analysis of top-performing
+VLA models---strengthen the policy beyond the baseline design:
+(i)~\textbf{bidirectional attention} (removing the causal mask) allows
+the action-narration and experience tokens to attend to the current visual
+scene, the prerequisite for closed-loop feedback to actually influence the
+decision;
+(ii)~an \textbf{expand-compress CoT-lite action head} paired with
+\textbf{action chunking} ($K{=}4$, inspired by $\pi_0$/GR-1) yields
+$4{\times}$ the supervised signal per step and enforces temporal
+consistency by predicting a plausible short action sequence;
+(iii)~\textbf{reward signal calibration}---exponential InfoNCE weighting
+$\exp(5\tilde{r})$, per-batch normalisation, reward gate scaling, and
+a raised alignment coefficient $\lambda_{\mathrm{align}}{=}1.0$---ensures
+the alignment loss and feedback gate carry discriminative gradient rather
+than collapsing to near-uniform weights.
 The dual feedback design---\Lact\ capturing \emph{what was attempted} and
 \Lexp\ capturing \emph{what happened}---exploits CLIP's preexisting
 semantic structure to ground outcome concepts with no additional pretraining.
@@ -933,31 +1110,66 @@ Experiments were conducted using Google Colaboratory (NVIDIA T4 / A100 GPUs).
 \appendix
 
 %% ============================================================================
-\section{Full Causal Attention Mask}
+\section{Attention Mask: Corrected Bidirectional Design}
 \label{app:mask}
+
+VERA uses \emph{full bidirectional attention} (no causal mask) in the main
+LLaMA fusion transformer.
+Table~\ref{tab:mask_correct} shows the corrected $11\!\times\!11$ pattern.
+Table~\ref{tab:mask_wrong} shows the original causal mask for comparison,
+illustrating why $E_{\mathrm{act}}$ and $E_{\mathrm{exp}}$ were blind to
+vision and history under the naive design (see \S\ref{sec:bug}).
 
 \begin{table}[h]
 \centering
-\caption{11$\times$11 causal mask. \cmark\ = can attend.
-         $\ell$=instr, $a$=action, $c$=exp., $v$=vision, $h$=history.}
-\label{tab:mask}
+\caption{\textbf{Corrected bidirectional mask} (VERA, current). All tokens attend to all tokens.
+         $\ell$=instruction, $a$=$E_\mathrm{act}$, $c$=$E_\mathrm{exp}$, $v$=vision, $h$=history.}
+\label{tab:mask_correct}
 \scriptsize
 \setlength{\tabcolsep}{3.5pt}
 \begin{tabular}{r|ccccccccccc}
 \toprule
  & $\ell$ & $a$ & $c$ & $v_0$ & $v_1$ & $v_2$ & $h_0$ & $h_1$ & $h_2$ & $h_3$ & CLS \\
 \midrule
-$\ell$   & \cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
-$a$      & \cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
-$c$      & \cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
-$v_0$    & \cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
-$v_1$    & \cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
-$v_2$    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
-$h_0$    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark \\
-$h_1$    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark \\
-$h_2$    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark \\
-$h_3$    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark \\
-CLS      & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$\ell$ & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$a$    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$c$    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$v_0$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$v_1$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$v_2$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$h_0$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$h_1$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$h_2$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+$h_3$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+CLS    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[h]
+\centering
+\caption{\textbf{Original (buggy) causal mask} shown for comparison. Under this mask,
+         $E_{\mathrm{act}}$ (row $a$) can only attend to $\ell$, and $E_{\mathrm{exp}}$ (row $c$)
+         can only attend to $\ell$ and $a$---both feedback tokens are blind to all vision and
+         history tokens (the \xmark\ cells in their rows).}
+\label{tab:mask_wrong}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{r|ccccccccccc}
+\toprule
+ & $\ell$ & $a$ & $c$ & $v_0$ & $v_1$ & $v_2$ & $h_0$ & $h_1$ & $h_2$ & $h_3$ & CLS \\
+\midrule
+$\ell$ & \cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
+$a$    & \cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
+$c$    & \cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
+$v_0$  & \cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
+$v_1$  & \cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
+$v_2$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark&\xmark \\
+$h_0$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark&\xmark \\
+$h_1$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark&\xmark \\
+$h_2$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark&\xmark \\
+$h_3$  & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\xmark \\
+CLS    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -978,16 +1190,21 @@ CLS      & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark
 \multicolumn{3}{l}{\textit{Architecture}} \\
 $T$ (vis frames)        & 3     & Video frame buffer \\
 $H$ (history steps)     & 4     & Past $(a,\mathbf{v},r)$ tuples \\
+$K$ (chunk size)        & 4     & Action chunking window ($\pi_0$/GR-1 style) \\
 $d$                     & 256   & Shared fusion dimension \\
 Fusion layers           & 6     & LLaMA decoder layers \\
 Fusion heads            & 8     & Attention heads \\
+Attention mask          & None  & Bidirectional (full) — no causal mask \\
 \midrule
 \multicolumn{3}{l}{\textit{SFT}} \\
 $\eta$                  & $3\!\times\!10^{-4}$ & AdamW LR (cosine to $10^{-6}$) \\
 Epochs (max)            & 80    & Early-stopping patience = 25 \\
 Batch size              & 32    & \\
-$\lambda_\mathrm{align}$& 0.15  & InfoNCE weight \\
+$\lambda_\mathrm{align}$& 1.0   & InfoNCE weight (raised from 0.15 for Mode B) \\
 $\lambda_\mathrm{reg}$  & 0.5   & Regression MSE weight \\
+InfoNCE weighting       & $\exp(5\tilde{r})$ & Exponential; $\tilde{r}$ = batch-normalised reward \\
+Reward gate scale $\gamma_g$ & 6.0 & Pre-scales $\tilde{r}$ before sigmoid gate MLP \\
+InfoNCE temperature $\tau$ & 0.10 (learned) & Clamped to $[0.05,\,1.0]$ \\
 $\eta_\mathrm{vis}$ (Mode B) & $1.5\!\times\!10^{-5}$ & CLIP vision LR (5\% of main) \\
 Label smoothing $\epsilon$ & 0.05 & \\
 Grad clip               & 1.0   & \\
