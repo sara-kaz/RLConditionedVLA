@@ -35,11 +35,20 @@ vera:
 
   # Auxiliary contrastive alignment loss coefficient (λ_align)
   # Applied to BOTH action and consequence alignment terms (averaged).
-  # 0.15 is stronger than the generic 0.1 default — justified because:
-  #   (a) real LT rewards are shaped (not sparse), giving richer alignment signal
-  #   (b) state_delta is now available → E_exp has high diversity (15+ strings)
+  #
+  # Why 1.0 (raised from 0.15):
+  #   Mode B training has 96M CLIP-vision params producing large gradients.
+  #   At 0.15, the alignment signal (~0.52 loss units) was drowned out by the
+  #   CE + CLIP-vision gradient (>2.0 loss units from 86M params).
+  #   At 1.0, alignment contributes ~3.5 units — on par with the CE term,
+  #   ensuring the projection layers actually receive meaningful gradient.
+  #
+  #   Combined with per-batch reward normalisation in the trainer and
+  #   exponential InfoNCE weighting exp(5·r), high-reward steps now receive
+  #   ~148× more alignment pull than zero-reward steps (vs 1.15× before).
+  #
   # Set to 0.0 to ablate all alignment losses.
-  alignment_loss_coef:    0.15
+  alignment_loss_coef:    1.0
 
   # Continuous action regression loss coefficient (λ_reg)
   # MSE between predicted action_vec and expert's executed action vector.

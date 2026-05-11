@@ -472,11 +472,19 @@ class ActionLanguageFeedbackEncoder(nn.Module):
         )
 
         if use_reward_gate:
+            # Gate MLP operates on reward already normalised to [0,1] by the
+            # trainer (see sft_trainer_vera.py).  Pre-scale by 6 so that:
+            #   r=0   → input=0   → sigmoid ≈ 0.50  (no-progress step, half weight)
+            #   r=0.5 → input=3   → sigmoid ≈ 0.95  (moderate step, near full)
+            #   r=1.0 → input=6   → sigmoid ≈ 0.998 (excellent step, full weight)
+            # This gives a full dynamic range vs the old gate which saw
+            # raw LT rewards [0,0.2] and output sigmoid ≈ 0.5 for everything.
             self.reward_gate = nn.Sequential(
                 nn.Linear(1, 64), nn.SiLU(),
                 nn.Linear(64, 32), nn.SiLU(),
                 nn.Linear(32, 1), nn.Sigmoid(),
             )
+            self._gate_scale = 6.0   # multiply normalised reward before gate
 
         self.dropout = nn.Dropout(dropout)
 
@@ -486,7 +494,10 @@ class ActionLanguageFeedbackEncoder(nn.Module):
             raw_emb = self.clip_model.encode_text(tokens).float()   # (B, 512)
         proj = self.proj(raw_emb)                                    # (B, d_model)
         if self.use_reward_gate:
-            gate = self.reward_gate(prev_reward.unsqueeze(-1).float())
+            # Reward is expected to be pre-normalised to [0,1] by the trainer.
+            # Scale by _gate_scale (default 6) before MLP for full sigmoid range.
+            r_scaled = prev_reward.unsqueeze(-1).float() * getattr(self, '_gate_scale', 6.0)
+            gate = self.reward_gate(r_scaled)
             proj = gate * proj
         proj = self.dropout(proj)
         return proj.unsqueeze(1), raw_emb                            # (B,1,D), (B,512)
@@ -577,15 +588,27 @@ class CrossAlignmentModule(nn.Module):
 
     score(instr, action_lang) = cosine_similarity   ∈ [-1, 1]
     loss = reward-weighted symmetric InfoNCE across the batch
+
+    Reward weighting design:
+      • Language-Table rewards ∈ [0, 0.2] (shaped) — pass normalised rewards
+        from the trainer (caller normalises to [0,1] before calling this).
+      • Exponential weighting exp(k·r) with k=5 gives a ×150 contrast between
+        r=0 (exp 0=1) and r=1 (exp 5=148), far more discriminative than
+        softplus which gives only 1.15× for r∈[0,0.2].
+      • Zero-reward steps (no progress) receive weight=1 (not zero) so they
+        still provide useful negatives, just de-emphasised vs high-reward steps.
     """
 
-    def __init__(self, temperature: float = 0.07):
+    def __init__(self, temperature: float = 0.10):
         super().__init__()
+        # Start at 0.10 (softer than 0.07) — avoids gradient vanishing early
+        # in training when representations are random and the 32-way softmax
+        # is far too sharp. The parameter is learned; it will anneal down.
         self.log_temp = nn.Parameter(torch.tensor(math.log(temperature)))
 
     @property
     def temperature(self):
-        return self.log_temp.exp().clamp(min=0.01, max=1.0)
+        return self.log_temp.exp().clamp(min=0.05, max=1.0)
 
     def score(self, instr_emb: torch.Tensor, action_lang_emb: torch.Tensor) -> torch.Tensor:
         return F.cosine_similarity(instr_emb, action_lang_emb, dim=-1)
@@ -600,8 +623,15 @@ class CrossAlignmentModule(nn.Module):
         labels   = torch.arange(B, device=instr_emb.device)
         loss_sym = (F.cross_entropy(sim,   labels, reduction="none")
                   + F.cross_entropy(sim.T, labels, reduction="none")) * 0.5
-        weights  = F.softplus(rewards.float())
-        weights  = weights / (weights.sum() + 1e-8)
+
+        # ── Exponential reward weighting ──────────────────────────────────────
+        # rewards should be pre-normalised to [0, 1] by the trainer.
+        # exp(5·r): r=0 → 1.0, r=0.5 → 12.2, r=1.0 → 148.4
+        # This gives high-reward steps ~150× more alignment pull than zero-reward
+        # steps, replacing softplus which gave only ~1.15× for raw LT rewards.
+        r = rewards.float().clamp(min=0.0, max=1.0)
+        weights = torch.exp(r * 5.0)           # exponential, k=5
+        weights = weights / (weights.sum() + 1e-8)
         return (weights * loss_sym).sum()
 
 

@@ -308,13 +308,25 @@ def load_language_table(root: str, skip_stop_steps: bool = True) -> List[Dict]:
 
         rewards_arr = np.array(rewards, dtype=np.float32)
 
+        # ── Normalise LT rewards from [0, ~0.2] → [0, 1] ─────────────────────
+        # Language-Table shaped rewards top out around 0.2 (goal reached).
+        # Leaving them raw causes two problems:
+        #   1. The reward gate sigmoid(MLP(r)) ≈ 0.5 for all steps (no range).
+        #   2. verbalize_consequence's "high" threshold (≥1.0) is never reached.
+        #   3. InfoNCE exponential weights exp(5·r) give only 2.7× contrast vs
+        #      148× when r ∈ [0,1].
+        # Dividing by the episode max (or 0.2 if flat) maps rewards to [0,1]
+        # and makes all three mechanisms discriminative.
+        ep_max = float(rewards_arr.max())
+        if ep_max > 1e-6:
+            rewards_arr = (rewards_arr / ep_max).astype(np.float32)
+        # (episodes with all-zero rewards stay at 0 — no division by zero)
+
         # ── Pseudo state_delta from consecutive reward differences ────────────
-        # Language-Table rewards are shaped ∈ [0, ~0.2]; there is no explicit
-        # distance-to-goal in the step dict.  We approximate it from the reward
-        # improvement: Δr > 0 → agent moved closer to goal → negative delta_dist
-        # by convention (closer = negative).
+        # Language-Table rewards are shaped ∈ [0, 1] after normalisation above.
+        # Δr > 0 → agent moved closer to goal → negative delta_dist by convention.
         #
-        # Scale factor 3.0 maps a typical LT Δr ≈ 0.05 to δd ≈ -0.15, which
+        # Scale factor 3.0 maps a typical Δr ≈ 0.05 to δd ≈ -0.15, which
         # falls in the "significantly" magnitude bin of verbalize_consequence.
         # Clipping at ±0.5 avoids outliers from noisy reward signals.
         delta_r    = np.zeros_like(rewards_arr)

@@ -185,7 +185,16 @@ def run_epoch(
             sd = batch.get("state_delta")
             state_delta = sd.to(device) if isinstance(sd, torch.Tensor) else None
 
-            out = model(frames, lang_tokens, action_hist, reward_hist,
+            # ── Per-batch reward normalisation ────────────────────────────────
+            # Normalise reward_hist to [0, 1] so that:
+            #   (a) the reward gate MLP sees a useful dynamic range, and
+            #   (b) the InfoNCE exponential weights exp(5·r) have full contrast.
+            # We use a running-max normalisation anchored at the batch maximum
+            # (not mean-std) so that zero-reward steps stay at 0.
+            r_max = reward_hist.max().clamp(min=1e-6)
+            reward_hist_norm = (reward_hist / r_max).clamp(0.0, 1.0)
+
+            out = model(frames, lang_tokens, action_hist, reward_hist_norm,
                         state_delta=state_delta,
                         action_vec_hist=action_vec_hist)
             logits = out["logits"]                          # (B, A)
@@ -196,11 +205,12 @@ def run_epoch(
             if (out["instr_emb"] is not None
                     and align_coef > 0
                     and is_train):
-                prev_reward = reward_hist[:, -1]            # most recent reward
+                # Use normalised rewards so exp(5·r) gives full contrast [1, 148]
+                prev_reward_norm = reward_hist_norm[:, -1]  # most recent (normalised)
                 align = model.compute_alignment_loss(
                     out["instr_proj"],          # d_model projected — gradient flows here
                     out["action_lang_proj"],    # d_model projected — gradient flows here
-                    prev_reward,
+                    prev_reward_norm,
                     out.get("consequence_proj"),  # d_model projected or None
                 )
 
