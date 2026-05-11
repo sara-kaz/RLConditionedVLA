@@ -297,7 +297,15 @@ def run_epoch(
 
 # ── Main training function ────────────────────────────────────────────────────
 
-def train(cfg: dict):
+def train(cfg: dict, resume_from: Optional[str] = None):
+    """
+    Train VERA with optional warm-restart from a saved checkpoint.
+
+    resume_from : path to a .pt file produced by this trainer.
+                  If provided, loads model weights (+ optimizer/scheduler
+                  states when available) and continues from the saved epoch.
+                  The existing sft_vera_log.json is preserved and appended to.
+    """
     device = resolve_device(cfg)
     print(f"[sft_vera] device = {device}")
 
@@ -368,8 +376,54 @@ def train(cfg: dict):
     patience         = int(t_cfg.get("early_stopping_patience", 10))
     patience_counter = 0
     log, best_val_acc = [], 0.0
+    start_epoch = 0
 
-    for epoch in range(1, total_epochs + 1):
+    # ── Resume from checkpoint ────────────────────────────────────────────────
+    if resume_from is not None:
+        ckpt = torch.load(resume_from, map_location=device)
+        model.load_state_dict(ckpt["model_state"])
+        start_epoch  = int(ckpt.get("epoch", 0))
+        best_val_acc = float(ckpt.get("val_acc", 0.0))
+
+        # Restore optimizer state (only available in checkpoints saved after
+        # this update; older checkpoints will skip silently)
+        if "optimizer_state" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+            print(f"[resume] Optimizer state restored from checkpoint.")
+        else:
+            print(f"[resume] No optimizer state in checkpoint — "
+                  f"fast-forwarding scheduler {start_epoch} steps.")
+
+        # Restore / reconstruct scheduler
+        if "scheduler_state" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state"])
+        else:
+            # Checkpoint pre-dates the resume feature — reconstruct the
+            # LR schedule by stepping the scheduler start_epoch times
+            # (no data required — purely mathematical).
+            for _ in range(start_epoch):
+                scheduler.step()
+
+        # Load existing log so we append to it rather than overwrite
+        log_path = out_dir / "sft_vera_log.json"
+        if log_path.exists():
+            with open(log_path) as f:
+                log = json.load(f)
+            # Keep only entries up to start_epoch (discard any partial/corrupt tail)
+            log = [r for r in log if r["epoch"] <= start_epoch]
+
+        # Reconstruct patience counter from log tail
+        for r in reversed(log):
+            if r.get("val_acc", 0.0) < best_val_acc:
+                patience_counter += 1
+            else:
+                break
+
+        print(f"[resume] Continuing from epoch {start_epoch+1}/{total_epochs}  "
+              f"best_val_acc={best_val_acc:.4f}  patience_counter={patience_counter}  "
+              f"lr={scheduler.get_last_lr()[0]:.3e}")
+
+    for epoch in range(start_epoch + 1, total_epochs + 1):
         t0 = time.time()
 
         train_m = run_epoch(
@@ -409,15 +463,22 @@ def train(cfg: dict):
               f"val loss {row['val_loss']:.4f} acc {row['val_acc']:.3f} | "
               f"lr {row['lr']:.2e} | {elapsed:.1f}s")
 
-        # Save best checkpoint + early stopping
+        # ── Incremental log write (survives disconnection) ────────────────────
+        # Write after every epoch so no progress is lost if Colab disconnects.
+        with open(out_dir / "sft_vera_log.json", "w") as f:
+            json.dump(log, f, indent=2)
+
+        # ── Save best checkpoint (with full resume state) ─────────────────────
         if val_m["accuracy"] > best_val_acc:
             best_val_acc = val_m["accuracy"]
             patience_counter = 0
             torch.save({
-                "epoch":       epoch,
-                "model_state": model.state_dict(),
-                "val_acc":     best_val_acc,
-                "cfg":         cfg,
+                "epoch":            epoch,
+                "model_state":      model.state_dict(),
+                "optimizer_state":  optimizer.state_dict(),   # ← NEW: enables resume
+                "scheduler_state":  scheduler.state_dict(),   # ← NEW: exact LR restore
+                "val_acc":          best_val_acc,
+                "cfg":              cfg,
             }, out_dir / "best_sft_vera.pt")
             print(f"  ✓ best checkpoint saved (val_acc={best_val_acc:.3f})")
         else:
@@ -428,16 +489,15 @@ def train(cfg: dict):
                       f"Best val acc: {best_val_acc:.3f}")
                 break
 
-        # Periodic snapshot
+        # ── Periodic snapshot ─────────────────────────────────────────────────
         if epoch % cfg["training"].get("save_every", 10) == 0:
             torch.save({
-                "epoch":       epoch,
-                "model_state": model.state_dict(),
-                "cfg":         cfg,
+                "epoch":            epoch,
+                "model_state":      model.state_dict(),
+                "optimizer_state":  optimizer.state_dict(),
+                "scheduler_state":  scheduler.state_dict(),
+                "cfg":              cfg,
             }, out_dir / f"sft_vera_epoch{epoch:04d}.pt")
-
-    with open(out_dir / "sft_vera_log.json", "w") as f:
-        json.dump(log, f, indent=2)
 
     print(f"\n[sft_vera] Done. Best val acc: {best_val_acc:.3f}")
 
@@ -449,5 +509,7 @@ sft_train = train
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/config.yaml")
+    parser.add_argument("--resume_from", default=None,
+                        help="Path to a best_sft_vera.pt checkpoint to resume from.")
     args = parser.parse_args()
-    train(load_config(args.config))
+    train(load_config(args.config), resume_from=args.resume_from)
