@@ -517,6 +517,13 @@ class TrajectoryDataset(Dataset):
     passed to VERA's history encoder for richer low-level conditioning.
     When absent, action_vec_hist is None and the encoder falls back to
     discrete-only history (fully backward compatible).
+
+    When chunk_size > 1 (action chunking, π0 / GR-1 style), __getitem__
+    also returns `target_chunk` of shape (chunk_size,) containing the
+    discrete action labels for timesteps t, t+1, …, t+K-1.  Steps beyond
+    the episode boundary are padded by repeating the last valid action.
+    The trainer uses all K targets to compute CE loss, giving K× the
+    supervision signal and enforcing temporal consistency across steps.
     """
 
     def __init__(
@@ -529,11 +536,13 @@ class TrajectoryDataset(Dataset):
         img_size:        int  = 224,
         clip_model_name: str  = "ViT-B/32",
         device:          str  = "cpu",
+        chunk_size:      int  = 1,    # action chunking window K (1 = disabled)
     ):
         self.history_len    = history_len
         self.num_vis_frames = num_vis_frames
         self.num_actions    = num_actions
         self.action_dim     = action_dim
+        self.chunk_size     = max(1, chunk_size)
         self.pad_action     = num_actions   # "no history" discrete padding index
 
         _, self.preprocess = clip.load(clip_model_name, device=device)
@@ -588,7 +597,8 @@ class TrajectoryDataset(Dataset):
             f"[TrajectoryDataset] {len(episodes)} episodes, "
             f"{len(self.index)} windows, "
             f"action_vectors={'yes' if self.has_action_vecs else 'no'}, "
-            f"action_dim={action_dim}"
+            f"action_dim={action_dim}, "
+            f"chunk_size={self.chunk_size}"
         )
 
     def __len__(self) -> int:
@@ -647,6 +657,19 @@ class TrajectoryDataset(Dataset):
         # ── Target action (label for discrete classifier) ─────────────────────
         target = int(ep["actions"][t])
 
+        # ── Action chunk targets (for action chunking with chunk_size > 1) ─────
+        # Returns the K consecutive discrete labels starting at timestep t.
+        # Steps that exceed the episode boundary are padded by repeating the last
+        # valid action (boundary padding — avoids the "stop" padding index which
+        # would introduce erroneous label noise near episode ends).
+        K     = self.chunk_size
+        T_ep  = len(ep["actions"])
+        chunk_end   = min(t + K, T_ep)
+        chunk_acts  = ep["actions"][t:chunk_end].tolist()     # 1..K valid actions
+        if len(chunk_acts) < K:                               # pad to K
+            chunk_acts = chunk_acts + [chunk_acts[-1]] * (K - len(chunk_acts))
+        target_chunk = torch.tensor(chunk_acts, dtype=torch.long)  # (K,)
+
         # ── State delta for Stream 3b consequence verbalization ──────────────
         # Signed distance-to-goal change at timestep t.  Negative → got closer.
         # For Language-Table episodes this is approximated from consecutive
@@ -681,5 +704,6 @@ class TrajectoryDataset(Dataset):
             "action_vec_hist": action_vec_hist,  # (history_len, action_dim) or None
             "state_delta":     torch.tensor(state_delta_val, dtype=torch.float32),  # scalar
             "target":          torch.tensor(target, dtype=torch.long),
+            "target_chunk":    target_chunk,     # (chunk_size,) discrete labels t..t+K-1
             "target_vec":      target_vec,       # (action_dim,) or None
         }

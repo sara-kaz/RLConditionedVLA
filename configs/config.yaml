@@ -21,6 +21,11 @@ model:
                               # training.clip_vision_lr (much smaller than main lr).
   action_dim:     2           # continuous action vector dimension — MUST match dataset
                               # Language-Table=2 [Δx,Δy]  MetaWorld=4  CALVIN=7
+  chunk_size:     4           # action chunking window K (π0 / GR-1 style)
+                              # predict K=4 consecutive discrete actions from one CLS token;
+                              # only step t is executed — training on t..t+K-1 gives 4×
+                              # supervision signal and enforces temporal consistency.
+                              # Set to 1 to disable chunking (single-step BC baseline).
 
 # ── VERA-Specific Settings ─────────────────────────────────────────────────────
 vera:

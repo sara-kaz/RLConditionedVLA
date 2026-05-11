@@ -85,6 +85,7 @@ def build_dataloaders(cfg: dict, device: str):
         action_dim=cfg["model"].get("action_dim", 4),
         img_size=cfg["data"].get("img_size", 224),
         device=device,
+        chunk_size=cfg["model"].get("chunk_size", 1),
     )
 
     val_frac = cfg["training"].get("val_fraction", 0.1)
@@ -122,6 +123,7 @@ def build_model(cfg: dict) -> VERAModel:
         use_consequence_token=vera_cfg.get("use_consequence_token", True),
         action_dim=cfg["model"].get("action_dim", 4),   # 4=MetaWorld, 2=Language-Table, 7=CALVIN
         action_vocab=vera_cfg.get("action_vocab"),      # None → use built-in vocabulary
+        chunk_size=cfg["model"].get("chunk_size", 1),   # K=1 → disabled; K=4 → π0-style
     )
 
 
@@ -144,6 +146,10 @@ def run_epoch(
     Losses
     ------
     ce       — cross-entropy on discrete action logits          (always)
+               When chunk_size > 1, CE is averaged over all K chunk steps:
+               ce = mean CE over {t, t+1, ..., t+K-1}.  This gives K×
+               the supervised signal and enforces temporal consistency
+               (inspired by π0 / GR-1 action chunking).
     align    — dual reward-weighted InfoNCE (experience + reasoning)
     reg      — MSE between predicted action_vec and target_vec  (only when
                the dataset provides continuous action targets, e.g. CALVIN)
@@ -162,6 +168,9 @@ def run_epoch(
     total_correct = total_samples = 0
     total_cos_exp = total_cos_rsn = 0.0
     cos_exp_n = cos_rsn_n = 0
+
+    # Detect chunk_size from model (1 = disabled, no overhead)
+    K = getattr(model, "chunk_size", 1)
 
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
@@ -197,8 +206,28 @@ def run_epoch(
             out = model(frames, lang_tokens, action_hist, reward_hist_norm,
                         state_delta=state_delta,
                         action_vec_hist=action_vec_hist)
-            logits = out["logits"]                          # (B, A)
-            ce     = criterion(logits, target)
+            logits = out["logits"]                          # (B, A) — step t only
+
+            # ── Cross-entropy loss (with optional action chunking) ────────────
+            # K=1: standard single-step CE on logits (B, A) vs target (B,).
+            # K>1: CE averaged over all K chunk steps — K× supervision signal.
+            #   logits_chunk (B, K, A) vs target_chunk (B, K)
+            #   Reshape to (B*K, A) / (B*K,) so nn.CrossEntropyLoss works.
+            if K > 1 and "logits_chunk" in out:
+                logits_chunk  = out["logits_chunk"]         # (B, K, A)
+                target_chunk  = batch.get("target_chunk")
+                if target_chunk is not None:
+                    target_chunk = target_chunk.to(device)  # (B, K)
+                    B_sz, A = logits.shape
+                    ce = criterion(
+                        logits_chunk.view(B_sz * K, A),     # (B*K, A)
+                        target_chunk.view(B_sz * K),        # (B*K,)
+                    )
+                else:
+                    # Fallback: dataset doesn't supply target_chunk yet
+                    ce = criterion(logits, target)
+            else:
+                ce = criterion(logits, target)
 
             # ── Dual contrastive alignment loss ───────────────────────────────
             align = torch.tensor(0.0, device=device)

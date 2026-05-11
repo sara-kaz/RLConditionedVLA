@@ -865,6 +865,7 @@ class VERAModel(nn.Module):
         use_consequence_token: bool = True,   # Stream 3b: encode action outcome [NEW]
         action_vocab:         Optional[Dict] = None,
         action_dim:           int   = 4,      # Stream 4: low-level action vector dim
+        chunk_size:           int   = 1,      # action chunking: predict next K steps (π0-style)
                                               # MetaWorld=4 (Δx,Δy,Δz,gripper)
                                               # CALVIN=7   (joint-space deltas)
                                               # Language-Table=6 (end-effector deltas)
@@ -946,16 +947,26 @@ class VERAModel(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
 
+        self.chunk_size = chunk_size
+
         # ── Discrete action classification head ────────────────────────────────
+        # Inspired by VITA-VLA's Action Chain-of-Thought: the head has an
+        # expand-compress bottleneck that forces an intermediate "plan" representation
+        # before producing the final action logits (reasoning step before acting).
+        # When chunk_size > 1 (action chunking, inspired by π0 / GR-1), the head
+        # predicts K = chunk_size consecutive discrete actions from a single CLS token;
+        # only the first is executed, but training on all K provides richer supervision
+        # and enforces temporal consistency across steps.
         self.action_head = nn.Sequential(
             RMSNorm(d_model),
-            nn.Linear(d_model, d_model, bias=False),
+            nn.Linear(d_model, d_model * 2, bias=False),       # expand: implicit plan
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, d_model // 2, bias=False),
+            RMSNorm(d_model * 2),
+            nn.Linear(d_model * 2, d_model, bias=False),       # compress: reasoned state
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, num_actions, bias=False),
+            nn.Linear(d_model, num_actions * chunk_size, bias=False),  # predict K steps
         )
 
         # ── Continuous action regression head ──────────────────────────────────
@@ -1094,24 +1105,38 @@ class VERAModel(nn.Module):
         # 5. Add ViLT modality-type embeddings
         sequence = self.modality_embed(sequence, mod_ids_t)
 
-        # 6. Causal mask (upper-triangular): position i attends only to j ≤ i
-        S           = sequence.size(1)
-        causal_mask = torch.triu(
-            torch.ones(S, S, device=sequence.device), diagonal=1
-        ).bool()
+        # 6. Bidirectional attention — NO causal mask.
+        # Rationale (from top VLA model analysis):
+        #   • VERA is used for BC (offline IL), NOT autoregressive generation —
+        #     causal masking is only necessary for next-token LLMs.
+        #   • With the causal mask, E_act (pos 1) and E_exp (pos 2) can only attend
+        #     to the instruction (pos 0) — they are BLIND to vision and history.
+        #     Bidirectional attention fixes this: feedback tokens now see the full
+        #     current visual scene before being aggregated by CLS (inspired by
+        #     VITA-VLA's cross-stream reasoning and π0's bidirectional DiT).
+        #   • The temporal ordering of the history stream is preserved by the
+        #     TemporalHistoryTransformer (which keeps its own causal mask).
 
-        # 7. LLaMA fusion transformer
-        out          = self.fusion_transformer(sequence, attn_mask=causal_mask)
+        # 7. LLaMA fusion transformer (bidirectional — no mask)
+        out          = self.fusion_transformer(sequence, attn_mask=None)
         cls_features = out[:, -1, :]                                 # (B, D)
 
-        # 8. Discrete action logits
-        logits = self.action_head(cls_features)                      # (B, A)
+        # 8. Discrete action logits + action chunking (π0 / GR-1 style)
+        # The expand-compress action head (CoT-lite bottleneck) produces
+        # chunk_size predictions: [a_t, a_{t+1}, ..., a_{t+K-1}].
+        # Only a_t is executed; training on all K steps enforces temporal
+        # consistency and multiplies the supervised signal by chunk_size.
+        raw_logits   = self.action_head(cls_features)                # (B, A*K)
+        K, A         = self.chunk_size, self.num_actions
+        logits_chunk = raw_logits.view(B, K, A)                      # (B, K, A)
+        logits       = logits_chunk[:, 0, :]                         # (B, A) — step t only
 
         # 9. Continuous action regression (parallel head, same CLS features)
         action_vec = self.action_reg_head(cls_features)              # (B, action_dim)
 
         return {
-            "logits":             logits,             # (B, num_actions)
+            "logits":             logits,             # (B, num_actions) — current step
+            "logits_chunk":       logits_chunk,       # (B, chunk_size, num_actions)
             "action_vec":         action_vec,         # (B, action_dim) ∈ (-1, 1)
             "cls_features":       cls_features,       # (B, d_model)
             "alignment_score":    alignment_score,    # (B,) cosine(instr_proj, act_proj)
