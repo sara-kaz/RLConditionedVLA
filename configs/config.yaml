@@ -99,6 +99,9 @@ training:
   label_smoothing:       0.05   # prevents overconfidence in BC phase
   grad_clip:             1.0
   val_fraction:          0.1
+  split_seed:            42    # fixed seed for episode-level train/val split
+                               # ensures identical split on resume — prevents
+                               # inflated val_acc from cross-run window leakage
   num_workers:           2
   save_every:            10
   output_dir:            checkpoints/

@@ -77,8 +77,26 @@ def build_dataloaders(cfg: dict, device: str):
             action_dim=cfg["model"].get("action_dim", 4),
         )
 
-    dataset = TrajectoryDataset(
-        episodes,
+    # ── Episode-level train/val split (fixed seed = reproducible across runs) ──
+    # Window-level random_split leaks data: neighbouring windows from the same
+    # episode can end up in both splits, inflating val_acc when resuming from
+    # a checkpoint (model already trained on adjacent windows).
+    # Splitting episodes first and building two separate datasets fully prevents
+    # cross-split episode leakage and gives consistent metrics across restarts.
+    val_frac   = cfg["training"].get("val_fraction", 0.1)
+    split_seed = cfg["training"].get("split_seed", 42)   # fixed across runs
+    rng = random.Random(split_seed)
+    ep_indices = list(range(len(episodes)))
+    rng.shuffle(ep_indices)
+    n_val_ep  = max(1, int(len(episodes) * val_frac))
+    val_idx   = ep_indices[:n_val_ep]
+    train_idx = ep_indices[n_val_ep:]
+    val_episodes   = [episodes[i] for i in sorted(val_idx)]
+    train_episodes = [episodes[i] for i in sorted(train_idx)]
+    print(f"[data] Episode split (seed={split_seed}): "
+          f"{len(train_episodes)} train / {len(val_episodes)} val episodes")
+
+    ds_kwargs = dict(
         history_len=cfg["model"]["history_len"],
         num_vis_frames=cfg["model"]["num_vis_frames"],
         num_actions=cfg["model"]["num_actions"],
@@ -87,11 +105,8 @@ def build_dataloaders(cfg: dict, device: str):
         device=device,
         chunk_size=cfg["model"].get("chunk_size", 1),
     )
-
-    val_frac = cfg["training"].get("val_fraction", 0.1)
-    n_val    = max(1, int(len(dataset) * val_frac))
-    n_train  = len(dataset) - n_val
-    train_ds, val_ds = random_split(dataset, [n_train, n_val])
+    train_ds = TrajectoryDataset(train_episodes, **ds_kwargs)
+    val_ds   = TrajectoryDataset(val_episodes,   **ds_kwargs)
 
     kw = dict(
         batch_size=cfg["training"]["batch_size"],
