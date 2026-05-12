@@ -15,10 +15,11 @@ model:
   d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
   dropout:        0.1
   freeze_clip:    true        # keep CLIP backbone frozen (recommended)
-  unfreeze_clip_vision: true  # fine-tune ViT image encoder (text stays frozen)
-                              # Recommended for Language-Table / CALVIN where CLIP
-                              # pretrained vision is out-of-domain. Pair with
-                              # training.clip_vision_lr (much smaller than main lr).
+  unfreeze_clip_vision: false # keep ViT frozen — fine-tuning 96M CLIP-vision params
+                              # on 38K LT windows causes severe overfitting (train acc
+                              # reaches 0.91 while val plateaus at 0.55 by epoch 40).
+                              # Mode A (fully frozen CLIP): 64M trainable params,
+                              # much less overfitting, consistent across all ablations.
   action_dim:     2           # continuous action vector dimension — MUST match dataset
                               # Language-Table=2 [Δx,Δy]  MetaWorld=4  CALVIN=7
   chunk_size:     4           # action chunking window K (π0 / GR-1 style)
@@ -41,19 +42,21 @@ vera:
   # Auxiliary contrastive alignment loss coefficient (λ_align)
   # Applied to BOTH action and consequence alignment terms (averaged).
   #
-  # Why 1.0 (raised from 0.15):
-  #   Mode B training has 96M CLIP-vision params producing large gradients.
-  #   At 0.15, the alignment signal (~0.52 loss units) was drowned out by the
-  #   CE + CLIP-vision gradient (>2.0 loss units from 86M params).
-  #   At 1.0, alignment contributes ~3.5 units — on par with the CE term,
-  #   ensuring the projection layers actually receive meaningful gradient.
+  # Why 0.1 (reduced from 1.0):
+  #   At λ=1.0, the InfoNCE term dominates the total loss (~3.46 units) but
+  #   does NOT converge on Language-Table — it stays at the random-batch
+  #   baseline (log(B)=log(32)≈3.47) for 40+ epochs. Root cause: LT shaped
+  #   rewards are tiny (≈0.01–0.05), so exp(5r)≈1.05–1.28 for nearly every
+  #   step — there is almost no contrast between "good" and "bad" steps in a
+  #   batch. The InfoNCE cannot find a learning signal and contributes only
+  #   gradient noise that fights the CE objective.
+  #   At λ=0.1, the alignment term contributes ~0.35 units — enough to keep
+  #   the projection layers from collapsing to zero without drowning the CE
+  #   loss that actually drives action prediction. The contrastive signal
+  #   provides light regularisation rather than a dominant objective.
   #
-  #   Combined with per-batch reward normalisation in the trainer and
-  #   exponential InfoNCE weighting exp(5·r), high-reward steps now receive
-  #   ~148× more alignment pull than zero-reward steps (vs 1.15× before).
-  #
-  # Set to 0.0 to ablate all alignment losses.
-  alignment_loss_coef:    1.0
+  # Set to 0.0 to ablate all alignment losses (Ablation D).
+  alignment_loss_coef:    0.1
 
   # Continuous action regression loss coefficient (λ_reg)
   # MSE between predicted action_vec and expert's executed action vector.
