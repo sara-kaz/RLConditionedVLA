@@ -524,6 +524,9 @@ class TrajectoryDataset(Dataset):
     the episode boundary are padded by repeating the last valid action.
     The trainer uses all K targets to compute CE loss, giving K× the
     supervision signal and enforcing temporal consistency across steps.
+
+    augment_train : if True, applies mild ColorJitter on train frames only
+    (no geometric flips — preserves consistency with discrete push bins).
     """
 
     def __init__(
@@ -537,6 +540,7 @@ class TrajectoryDataset(Dataset):
         clip_model_name: str  = "ViT-B/32",
         device:          str  = "cpu",
         chunk_size:      int  = 1,    # action chunking window K (1 = disabled)
+        augment_train:   bool = False,  # train-only mild ColorJitter (no flips — preserves action/frame alignment)
     ):
         self.history_len    = history_len
         self.num_vis_frames = num_vis_frames
@@ -544,14 +548,28 @@ class TrajectoryDataset(Dataset):
         self.action_dim     = action_dim
         self.chunk_size     = max(1, chunk_size)
         self.pad_action     = num_actions   # "no history" discrete padding index
+        self.augment_train  = augment_train
 
         _, self.preprocess = clip.load(clip_model_name, device=device)
 
-        self.transform = T.Compose([
+        _clip_mean = [0.48145466, 0.4578275, 0.40821073]
+        _clip_std  = [0.26862954, 0.26130258, 0.27577711]
+        _norm = T.Normalize(mean=_clip_mean, std=_clip_std)
+        # Val / deterministic train path — matches prior behaviour exactly.
+        self._transform_eval = T.Compose([
             T.Resize((img_size, img_size)),
             T.ToTensor(),
-            T.Normalize(mean=[0.48145466, 0.4578275,  0.40821073],
-                        std= [0.26862954, 0.26130258, 0.27577711]),
+            _norm,
+        ])
+        # Train-only: reduces overfitting to exact RGB textures on held-out episodes.
+        self._transform_train = T.Compose([
+            T.Resize((img_size, img_size)),
+            T.RandomApply(
+                [T.ColorJitter(brightness=0.18, contrast=0.18, saturation=0.12, hue=0.02)],
+                p=0.9,
+            ),
+            T.ToTensor(),
+            _norm,
         ])
 
         # Check whether any episode has action_vectors
@@ -598,7 +616,8 @@ class TrajectoryDataset(Dataset):
             f"{len(self.index)} windows, "
             f"action_vectors={'yes' if self.has_action_vecs else 'no'}, "
             f"action_dim={action_dim}, "
-            f"chunk_size={self.chunk_size}"
+            f"chunk_size={self.chunk_size}, "
+            f"augment_train={self.augment_train}"
         )
 
     def __len__(self) -> int:
@@ -618,9 +637,8 @@ class TrajectoryDataset(Dataset):
         if pad_needed > 0:
             pad = np.zeros_like(raw_frames[0:1]).repeat(pad_needed, axis=0)
             raw_frames = np.concatenate([pad, raw_frames], axis=0)
-        frames = torch.stack([
-            self.transform(Image.fromarray(f)) for f in raw_frames
-        ])   # (num_vis_frames, 3, H, W)
+        _tf = self._transform_train if self.augment_train else self._transform_eval
+        frames = torch.stack([_tf(Image.fromarray(f)) for f in raw_frames])  # (T_vis, 3, H, W)
 
         # ── Discrete action + reward history ──────────────────────────────────
         start_h      = max(0, t - self.history_len)

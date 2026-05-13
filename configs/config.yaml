@@ -13,13 +13,13 @@ model:
   fusion_heads:   8           # attention heads in fusion transformer
   d_model:        256         # shared embedding dimension
   d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
-  dropout:        0.1
+  dropout:        0.15      # raised slightly — less overfitting on fixed episodes
   freeze_clip:    true        # keep CLIP backbone frozen (recommended)
   unfreeze_clip_vision: true  # fine-tune ViT image encoder — needed for LT domain
                               # adaptation (overhead synthetic images ≠ ImageNet).
                               # Frozen CLIP vision caps val_acc at ~0.455 because
                               # features don't encode push direction from above.
-                              # Use clip_vision_lr=3e-6 (10× smaller than before)
+                              # Use clip_vision_lr≈2e-6 (see training.clip_vision_lr)
                               # to fine-tune slowly without overfitting.
   action_dim:     2           # continuous action vector dimension — MUST match dataset
                               # Language-Table=2 [Δx,Δy]  MetaWorld=4  CALVIN=7
@@ -43,21 +43,10 @@ vera:
   # Auxiliary contrastive alignment loss coefficient (λ_align)
   # Applied to BOTH action and consequence alignment terms (averaged).
   #
-  # Why 0.1 (reduced from 1.0):
-  #   At λ=1.0, the InfoNCE term dominates the total loss (~3.46 units) but
-  #   does NOT converge on Language-Table — it stays at the random-batch
-  #   baseline (log(B)=log(32)≈3.47) for 40+ epochs. Root cause: LT shaped
-  #   rewards are tiny (≈0.01–0.05), so exp(5r)≈1.05–1.28 for nearly every
-  #   step — there is almost no contrast between "good" and "bad" steps in a
-  #   batch. The InfoNCE cannot find a learning signal and contributes only
-  #   gradient noise that fights the CE objective.
-  #   At λ=0.1, the alignment term contributes ~0.35 units — enough to keep
-  #   the projection layers from collapsing to zero without drowning the CE
-  #   loss that actually drives action prediction. The contrastive signal
-  #   provides light regularisation rather than a dominant objective.
-  #
-  # Set to 0.0 to ablate all alignment losses (Ablation D).
-  alignment_loss_coef:    0.1
+  # Why 0.05 (default): on Language-Table, InfoNCE stays near log(B)≈3.46 (weak
+  # in-batch reward contrast). At λ=0.1 that is ~0.35 loss units of mostly noise
+  # vs CE; 0.05 halves that while keeping projection heads active. Set 0.0 to ablate.
+  alignment_loss_coef:    0.05
 
   # Continuous action regression loss coefficient (λ_reg)
   # MSE between predicted action_vec and expert's executed action vector.
@@ -91,6 +80,7 @@ data:
   synthetic_episodes:  200      # episodes to generate when no real data provided
   ep_len:              30       # average episode length for synthetic data
   img_size:            224      # resize all frames to this square size
+  augment_train:       true     # train-only ColorJitter (see TrajectoryDataset); improves val generalisation
 
 # ── Supervised Fine-Tuning (Behavioural Cloning) ──────────────────────────────
 training:
@@ -100,7 +90,7 @@ training:
   lr:                    3e-4
   lr_min:                1e-6
   weight_decay:          5e-4   # raised from 1e-4 to reduce overfitting with 96M params
-  label_smoothing:       0.05   # prevents overconfidence in BC phase
+  label_smoothing:       0.08   # slightly stronger — reduces train/val CE gap
   grad_clip:             1.0
   val_fraction:          0.1
   split_seed:            42    # fixed seed for episode-level train/val split
@@ -110,10 +100,8 @@ training:
   save_every:            10
   output_dir:            checkpoints/
   early_stopping_patience: 25   # stop after N epochs with no val_acc improvement
-  clip_vision_lr:        3e-6   # LR for CLIP vision — 10× smaller than before.
-                                 # 1.5e-5 caused severe overfitting (train 0.91 vs
-                                 # val 0.55 at epoch 40). 3e-6 gives slow domain
-                                 # adaptation without memorising training episodes.
+  clip_vision_lr:        2e-6   # LR for unfrozen CLIP vision — slow adaptation;
+                                 # 3e-6 still allowed train≫val; 2e-6 is gentler for Colab reruns.
 
 # ── Online RL Fine-Tuning ──────────────────────────────────────────────────────
 rl:

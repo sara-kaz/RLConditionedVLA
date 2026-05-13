@@ -55,6 +55,7 @@ data:
   dataset_type:     calvin
   calvin_split:     training
   img_size:         224           # matches LT
+  augment_train:    true         # same regularisation as default LT config
 
 # ── Training ─────────────────────────────────────────────────────────────────
 training:

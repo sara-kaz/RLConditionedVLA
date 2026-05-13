@@ -106,8 +106,10 @@ def build_dataloaders(cfg: dict, device: str):
         device=device,
         chunk_size=cfg["model"].get("chunk_size", 1),
     )
-    train_ds = TrajectoryDataset(train_episodes, **ds_kwargs)
-    val_ds   = TrajectoryDataset(val_episodes,   **ds_kwargs)
+    # Mild train-only augmentation reduces RGB memorisation; val stays deterministic.
+    use_aug = bool(cfg["data"].get("augment_train", True))
+    train_ds = TrajectoryDataset(train_episodes, **ds_kwargs, augment_train=use_aug)
+    val_ds   = TrajectoryDataset(val_episodes,   **ds_kwargs, augment_train=False)
 
     kw = dict(
         batch_size=cfg["training"]["batch_size"],
