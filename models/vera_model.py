@@ -857,6 +857,7 @@ class VERAModel(nn.Module):
         d_model:              int   = 256,
         d_ff_scale:           int   = 4,
         dropout:              float = 0.1,
+        vision_token_dropout: float = 0.0,   # dropout on projected vision tokens (train only)
         freeze_clip:          bool  = True,
         unfreeze_clip_vision: bool  = False,   # fine-tune ViT vision encoder (keep text frozen)
         use_lang_feedback:    bool  = True,
@@ -900,6 +901,8 @@ class VERAModel(nn.Module):
         # Using RMSNorm in place of LayerNorm for consistency with LLaMA backbone
         self.vis_proj  = nn.Sequential(nn.Linear(clip_dim, d_model, bias=False), RMSNorm(d_model))
         self.lang_proj = nn.Sequential(nn.Linear(clip_dim, d_model, bias=False), RMSNorm(d_model))
+        _vtd = float(vision_token_dropout)
+        self.vis_token_dropout = nn.Dropout(_vtd) if _vtd > 0 else None
 
         # ── Stream 3: Action Language Feedback Encoder [NOVEL] ───────────────
         if use_lang_feedback:
@@ -1039,6 +1042,8 @@ class VERAModel(nn.Module):
 
         # 1. Encode all streams
         vis_tokens              = self.encode_frames(frames)          # (B, T, D)
+        if self.vis_token_dropout is not None:
+            vis_tokens = self.vis_token_dropout(vis_tokens)
         lang_token,  instr_emb = self.encode_instruction(lang_tokens) # (B,1,D), (B,512)
         hist_tokens             = self.history_encoder(                # (B, H, D)
             action_hist, reward_hist, action_vec_hist

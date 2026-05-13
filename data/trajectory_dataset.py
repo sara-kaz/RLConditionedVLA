@@ -527,6 +527,14 @@ class TrajectoryDataset(Dataset):
 
     augment_train : if True, applies mild ColorJitter on train frames only
     (no geometric flips — preserves consistency with discrete push bins).
+
+    window_stride : when >1, only every *stride*'th timestep is indexed as a
+    training window (reduces near-duplicate samples from sliding windows over
+    the same episode).  Use 1 for validation / full coverage; 2–3 on train to
+    curb overfitting on small datasets.
+
+    augment_noise_std : if >0 and augment_train, adds Gaussian noise to
+    normalised frame tensors (train only).
     """
 
     def __init__(
@@ -541,6 +549,8 @@ class TrajectoryDataset(Dataset):
         device:          str  = "cpu",
         chunk_size:      int  = 1,    # action chunking window K (1 = disabled)
         augment_train:   bool = False,  # train-only mild ColorJitter (no flips — preserves action/frame alignment)
+        window_stride:   int  = 1,      # subsample timesteps when building the flat index (train often 2–3)
+        augment_noise_std: float = 0.0,  # std on normalised tensors; 0 disables
     ):
         self.history_len    = history_len
         self.num_vis_frames = num_vis_frames
@@ -549,6 +559,8 @@ class TrajectoryDataset(Dataset):
         self.chunk_size     = max(1, chunk_size)
         self.pad_action     = num_actions   # "no history" discrete padding index
         self.augment_train  = augment_train
+        self.window_stride  = max(1, int(window_stride))
+        self.augment_noise_std = float(augment_noise_std)
 
         _, self.preprocess = clip.load(clip_model_name, device=device)
 
@@ -565,9 +577,11 @@ class TrajectoryDataset(Dataset):
         self._transform_train = T.Compose([
             T.Resize((img_size, img_size)),
             T.RandomApply(
-                [T.ColorJitter(brightness=0.18, contrast=0.18, saturation=0.12, hue=0.02)],
-                p=0.9,
+                [T.ColorJitter(brightness=0.22, contrast=0.22, saturation=0.14, hue=0.03)],
+                p=0.95,
             ),
+            T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 0.35))], p=0.15),
+            T.RandomGrayscale(p=0.06),
             T.ToTensor(),
             _norm,
         ])
@@ -600,7 +614,7 @@ class TrajectoryDataset(Dataset):
             if T_ep < min_len:
                 skipped += 1
                 continue
-            for t in range(1, T_ep):
+            for t in range(1, T_ep, self.window_stride):
                 self.index.append((ep_i, t))
         if skipped:
             print(f"[TrajectoryDataset] Skipped {skipped} episodes shorter than "
@@ -617,6 +631,7 @@ class TrajectoryDataset(Dataset):
             f"action_vectors={'yes' if self.has_action_vecs else 'no'}, "
             f"action_dim={action_dim}, "
             f"chunk_size={self.chunk_size}, "
+            f"window_stride={self.window_stride}, "
             f"augment_train={self.augment_train}"
         )
 
@@ -639,6 +654,8 @@ class TrajectoryDataset(Dataset):
             raw_frames = np.concatenate([pad, raw_frames], axis=0)
         _tf = self._transform_train if self.augment_train else self._transform_eval
         frames = torch.stack([_tf(Image.fromarray(f)) for f in raw_frames])  # (T_vis, 3, H, W)
+        if self.augment_train and self.augment_noise_std > 0.0:
+            frames = frames + torch.randn_like(frames) * self.augment_noise_std
 
         # ── Discrete action + reward history ──────────────────────────────────
         start_h      = max(0, t - self.history_len)

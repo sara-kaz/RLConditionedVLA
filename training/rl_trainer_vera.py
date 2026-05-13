@@ -355,6 +355,7 @@ def rl_train(cfg: dict):
             d_model=cfg["model"].get("d_model", 256),
             d_ff_scale=cfg["model"].get("d_ff_scale", 4),
             dropout=cfg["model"].get("dropout", 0.1),
+            vision_token_dropout=float(cfg["model"].get("vision_token_dropout", 0.0)),
             freeze_clip=cfg["model"].get("freeze_clip", True),
             use_lang_feedback=vera_cfg.get("use_lang_feedback", True),
             use_temporal_history=vera_cfg.get("use_temporal_history", True),

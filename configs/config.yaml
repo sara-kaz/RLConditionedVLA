@@ -13,21 +13,19 @@ model:
   fusion_heads:   8           # attention heads in fusion transformer
   d_model:        256         # shared embedding dimension
   d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
-  dropout:        0.15      # raised slightly — less overfitting on fixed episodes
+  dropout:        0.22       # fusion + heads — higher p curbs train-only memorisation
+  # Dropout on projected CLIP vision tokens before fusion (train-only). Strong
+  # regulariser when train acc ≫ val acc; set 0.0 to disable.
+  vision_token_dropout: 0.14
   freeze_clip:    true        # keep CLIP backbone frozen (recommended)
-  unfreeze_clip_vision: true  # fine-tune ViT image encoder — needed for LT domain
-                              # adaptation (overhead synthetic images ≠ ImageNet).
-                              # Frozen CLIP vision caps val_acc at ~0.455 because
-                              # features don't encode push direction from above.
-                              # Use clip_vision_lr≈2e-6 (see training.clip_vision_lr)
-                              # to fine-tune slowly without overfitting.
+  unfreeze_clip_vision: false # true adapts ViT to LT/CALVIN look but often overfits
+                              # small episode splits (train ~0.97, val ~0.5). Prefer
+                              # false + vision_token_dropout + train_window_stride;
+                              # set true only if val plateaus low with frozen vision.
   action_dim:     2           # continuous action vector dimension — MUST match dataset
                               # Language-Table=2 [Δx,Δy]  MetaWorld=4  CALVIN=7
-  chunk_size:     4           # action chunking window K (π0 / GR-1 style)
-                              # predict K=4 consecutive discrete actions from one CLS token;
-                              # only step t is executed — training on t..t+K-1 gives 4×
-                              # supervision signal and enforces temporal consistency.
-                              # Set to 1 to disable chunking (single-step BC baseline).
+  chunk_size:     2           # K>1 multiplies CE targets; K=4 can overfit temporal shortcuts.
+                              # K=2 is a middle ground; use 1 for simplest BC / less capacity.
 
 # ── VERA-Specific Settings ─────────────────────────────────────────────────────
 vera:
@@ -52,7 +50,7 @@ vera:
   # MSE between predicted action_vec and expert's executed action vector.
   # Only active when dataset supplies action_vectors (CALVIN, Language-Table, MetaWorld).
   # Set to 0.0 to ablate the regression head (discrete-only baseline).
-  regression_loss_coef:   0.5
+  regression_loss_coef:   0.35  # slightly lower — MSE on continuous actions can overfit
 
   # Language-Table 8-bin angle-quantised action vocabulary.
   # Bins correspond to arctan2(Δy,Δx) quantised into 8 equal sectors (π/4 each).
@@ -81,6 +79,8 @@ data:
   ep_len:              30       # average episode length for synthetic data
   img_size:            224      # resize all frames to this square size
   augment_train:       true     # train-only ColorJitter (see TrajectoryDataset); improves val generalisation
+  train_window_stride: 2        # use every 2nd timestep on train only — fewer redundant windows / episode
+  augment_noise_std:   0.018    # Gaussian noise on normalised frames (train only); 0 disables
 
 # ── Supervised Fine-Tuning (Behavioural Cloning) ──────────────────────────────
 training:
@@ -89,10 +89,10 @@ training:
   batch_size:            32
   lr:                    3e-4
   lr_min:                1e-6
-  weight_decay:          5e-4   # raised from 1e-4 to reduce overfitting with 96M params
-  label_smoothing:       0.08   # slightly stronger — reduces train/val CE gap
+  weight_decay:          8e-4   # L2 on weights — helps when model memorises train episodes
+  label_smoothing:       0.10   # softer targets — reduces overconfident train fitting
   grad_clip:             1.0
-  val_fraction:          0.1
+  val_fraction:          0.15   # slightly larger held-out set — stabler val curve + less train data
   split_seed:            42    # fixed seed for episode-level train/val split
                                # ensures identical split on resume — prevents
                                # inflated val_acc from cross-run window leakage

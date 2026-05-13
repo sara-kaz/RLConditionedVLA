@@ -52,6 +52,7 @@ def build_vera_from_cfg(cfg: dict, device: str) -> VERAModel:
         d_model              = cfg["model"].get("d_model", 256),
         d_ff_scale           = cfg["model"].get("d_ff_scale", 4),
         dropout              = 0.0,          # no dropout at eval
+        vision_token_dropout = 0.0,
         freeze_clip          = True,
         use_lang_feedback    = vera_cfg.get("use_lang_feedback", True),
         use_temporal_history = vera_cfg.get("use_temporal_history", True),

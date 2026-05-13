@@ -96,6 +96,9 @@ def build_dataloaders(cfg: dict, device: str):
     train_episodes = [episodes[i] for i in sorted(train_idx)]
     print(f"[data] Episode split (seed={split_seed}): "
           f"{len(train_episodes)} train / {len(val_episodes)} val episodes")
+    train_stride = max(1, int(cfg["data"].get("train_window_stride", 1)))
+    if train_stride > 1:
+        print(f"[data] train_window_stride={train_stride} (val uses stride 1)")
 
     ds_kwargs = dict(
         history_len=cfg["model"]["history_len"],
@@ -108,8 +111,21 @@ def build_dataloaders(cfg: dict, device: str):
     )
     # Mild train-only augmentation reduces RGB memorisation; val stays deterministic.
     use_aug = bool(cfg["data"].get("augment_train", True))
-    train_ds = TrajectoryDataset(train_episodes, **ds_kwargs, augment_train=use_aug)
-    val_ds   = TrajectoryDataset(val_episodes,   **ds_kwargs, augment_train=False)
+    noise_std = float(cfg["data"].get("augment_noise_std", 0.0))
+    train_ds = TrajectoryDataset(
+        train_episodes,
+        **ds_kwargs,
+        augment_train=use_aug,
+        window_stride=train_stride,
+        augment_noise_std=noise_std if use_aug else 0.0,
+    )
+    val_ds = TrajectoryDataset(
+        val_episodes,
+        **ds_kwargs,
+        augment_train=False,
+        window_stride=1,
+        augment_noise_std=0.0,
+    )
 
     kw = dict(
         batch_size=cfg["training"]["batch_size"],
@@ -124,6 +140,7 @@ def build_dataloaders(cfg: dict, device: str):
 
 def build_model(cfg: dict) -> VERAModel:
     vera_cfg = cfg.get("vera", {})
+    vis_drop = float(cfg["model"].get("vision_token_dropout", 0.0))
     return VERAModel(
         num_actions=cfg["model"]["num_actions"],
         history_len=cfg["model"]["history_len"],
@@ -133,6 +150,7 @@ def build_model(cfg: dict) -> VERAModel:
         d_model=cfg["model"].get("d_model", 256),
         d_ff_scale=cfg["model"].get("d_ff_scale", 4),
         dropout=cfg["model"].get("dropout", 0.1),
+        vision_token_dropout=float(vis_drop),
         freeze_clip=cfg["model"].get("freeze_clip", True),
         unfreeze_clip_vision=cfg["model"].get("unfreeze_clip_vision", False),
         use_lang_feedback=vera_cfg.get("use_lang_feedback", True),
