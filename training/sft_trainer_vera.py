@@ -13,14 +13,19 @@ CLIP's shared embedding space.
 Usage
 -----
   python -m training.sft_trainer_vera --config configs/config.yaml
+
+Optional EMA (``training.ema_decay`` in YAML): maintains a shadow weight average;
+validation and ``best_sft_vera.pt`` can use those weights (``validate_with_ema``)
+for better held-out accuracy without freezing CLIP.
 """
 
 import argparse
+import copy
 import json
 import random
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -40,6 +45,60 @@ def load_config(path: str) -> dict:
     import yaml
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+class ModelEMA:
+    """
+    Exponential moving average of floating-point tensors in ``model.state_dict()``.
+    Updating after each train step smooths weights and often improves *validation*
+    accuracy without freezing the backbone. Checkpoint saves can persist ``ema_state``.
+    """
+
+    def __init__(self, model: nn.Module, decay: float):
+        self.decay = float(decay)
+        self.shadow: Dict[str, torch.Tensor] = {}
+        self._keys: list[str] = []
+        for k, v in model.state_dict().items():
+            if torch.is_floating_point(v):
+                self._keys.append(k)
+                self.shadow[k] = v.detach().clone()
+        self._backup: Optional[Dict[str, torch.Tensor]] = None
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "decay": self.decay,
+            "shadow": {k: self.shadow[k].clone() for k in self._keys},
+        }
+
+    def load_state_dict(self, sd: Dict[str, Any], model: nn.Module) -> None:
+        self.decay = float(sd["decay"])
+        dev = next(model.parameters()).device
+        for k, v in sd["shadow"].items():
+            if k in self.shadow:
+                self.shadow[k].copy_(v.to(dev))
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        d = self.decay
+        cur = model.state_dict()
+        for k in self._keys:
+            self.shadow[k].mul_(d).add_(cur[k].detach(), alpha=1.0 - d)
+
+    @torch.no_grad()
+    def apply_to(self, model: nn.Module) -> None:
+        sd = model.state_dict()
+        self._backup = {k: sd[k].detach().clone() for k in self._keys}
+        for k in self._keys:
+            sd[k].copy_(self.shadow[k])
+
+    @torch.no_grad()
+    def restore(self, model: nn.Module) -> None:
+        if self._backup is None:
+            return
+        sd = model.state_dict()
+        for k in self._keys:
+            sd[k].copy_(self._backup[k])
+        self._backup = None
 
 
 def resolve_device(cfg: dict) -> str:
@@ -175,6 +234,7 @@ def run_epoch(
     grad_clip:    float = 1.0,
     align_coef:   float = 0.1,
     reg_coef:     float = 0.5,
+    ema:          Optional[ModelEMA] = None,
 ) -> dict:
     """
     One full pass over *loader*.
@@ -298,6 +358,8 @@ def run_epoch(
                     [p for p in model.parameters() if p.requires_grad], grad_clip
                 )
                 optimizer.step()
+                if ema is not None:
+                    ema.update(model)
 
             # ── Alignment cosine diagnostic (no gradient) ─────────────────────
             # Tracks whether the alignment loss is actually pulling embeddings
@@ -413,26 +475,27 @@ def train(cfg: dict, resume_from: Optional[str] = None):
     patience_counter = 0
     log, best_val_acc = [], 0.0
     start_epoch = 0
+    resume_ckpt: Optional[dict] = None
 
     # ── Resume from checkpoint ────────────────────────────────────────────────
     if resume_from is not None:
-        ckpt = torch.load(resume_from, map_location=device)
-        model.load_state_dict(ckpt["model_state"])
-        start_epoch  = int(ckpt.get("epoch", 0))
-        best_val_acc = float(ckpt.get("val_acc", 0.0))
+        resume_ckpt = torch.load(resume_from, map_location=device)
+        model.load_state_dict(resume_ckpt["model_state"])
+        start_epoch  = int(resume_ckpt.get("epoch", 0))
+        best_val_acc = float(resume_ckpt.get("val_acc", 0.0))
 
         # Restore optimizer state (only available in checkpoints saved after
         # this update; older checkpoints will skip silently)
-        if "optimizer_state" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer_state"])
+        if "optimizer_state" in resume_ckpt:
+            optimizer.load_state_dict(resume_ckpt["optimizer_state"])
             print(f"[resume] Optimizer state restored from checkpoint.")
         else:
             print(f"[resume] No optimizer state in checkpoint — "
                   f"fast-forwarding scheduler {start_epoch} steps.")
 
         # Restore / reconstruct scheduler
-        if "scheduler_state" in ckpt:
-            scheduler.load_state_dict(ckpt["scheduler_state"])
+        if "scheduler_state" in resume_ckpt:
+            scheduler.load_state_dict(resume_ckpt["scheduler_state"])
         else:
             # Checkpoint pre-dates the resume feature — reconstruct the
             # LR schedule by stepping the scheduler start_epoch times
@@ -459,6 +522,16 @@ def train(cfg: dict, resume_from: Optional[str] = None):
               f"best_val_acc={best_val_acc:.4f}  patience_counter={patience_counter}  "
               f"lr={scheduler.get_last_lr()[0]:.3e}")
 
+    ema_decay = float(t_cfg.get("ema_decay", 0.0))
+    ema: Optional[ModelEMA] = None
+    if 0.0 < ema_decay < 1.0:
+        ema = ModelEMA(model, ema_decay)
+        if resume_ckpt is not None and resume_ckpt.get("ema_state") is not None:
+            ema.load_state_dict(resume_ckpt["ema_state"], model)
+            print(f"[ema] Restored shadow from checkpoint (decay={ema.decay}).")
+        print(f"[ema] Enabled  decay={ema_decay}  validate_with_ema="
+              f"{bool(t_cfg.get('validate_with_ema', True))}")
+
     for epoch in range(start_epoch + 1, total_epochs + 1):
         t0 = time.time()
 
@@ -466,12 +539,20 @@ def train(cfg: dict, resume_from: Optional[str] = None):
             model, train_loader, optimizer, criterion,
             device, is_train=True,
             grad_clip=grad_clip, align_coef=align_coef, reg_coef=reg_coef,
+            ema=ema,
         )
-        val_m = run_epoch(
-            model, val_loader, None, criterion,
-            device, is_train=False,
-            align_coef=0.0, reg_coef=reg_coef,   # reg active at val for monitoring
-        )
+        use_ema_val = ema is not None and bool(t_cfg.get("validate_with_ema", True))
+        if use_ema_val:
+            ema.apply_to(model)
+        try:
+            val_m = run_epoch(
+                model, val_loader, None, criterion,
+                device, is_train=False,
+                align_coef=0.0, reg_coef=reg_coef,   # reg active at val for monitoring
+            )
+        finally:
+            if use_ema_val:
+                ema.restore(model)
         scheduler.step()
         elapsed = time.time() - t0
 
@@ -491,12 +572,14 @@ def train(cfg: dict, resume_from: Optional[str] = None):
             "lr":              round(scheduler.get_last_lr()[0], 8),
             "time_s":          round(elapsed, 1),
         }
+        row["val_ema"] = bool(use_ema_val)
         log.append(row)
+        val_tag = "val(EMA)" if use_ema_val else "val"
         print(f"Epoch {epoch:3d}/{total_epochs} | "
               f"train loss {row['train_loss']:.4f} acc {row['train_acc']:.3f} "
               f"align {row['train_align']:.4f} reg {row['train_reg']:.4f} | "
               f"cos_exp {row['train_cos_exp']:+.3f} cos_rsn {row['train_cos_rsn']:+.3f} | "
-              f"val loss {row['val_loss']:.4f} acc {row['val_acc']:.3f} | "
+              f"{val_tag} loss {row['val_loss']:.4f} acc {row['val_acc']:.3f} | "
               f"lr {row['lr']:.2e} | {elapsed:.1f}s")
 
         # ── Incremental log write (survives disconnection) ────────────────────
@@ -508,14 +591,22 @@ def train(cfg: dict, resume_from: Optional[str] = None):
         if val_m["accuracy"] > best_val_acc:
             best_val_acc = val_m["accuracy"]
             patience_counter = 0
-            torch.save({
+            sd_model = copy.deepcopy(model.state_dict())
+            if use_ema_val and ema is not None:
+                ema.apply_to(model)
+                sd_model = copy.deepcopy(model.state_dict())
+                ema.restore(model)
+            best_payload = {
                 "epoch":            epoch,
-                "model_state":      model.state_dict(),
-                "optimizer_state":  optimizer.state_dict(),   # ← NEW: enables resume
-                "scheduler_state":  scheduler.state_dict(),   # ← NEW: exact LR restore
+                "model_state":      sd_model,
+                "optimizer_state":  optimizer.state_dict(),
+                "scheduler_state":  scheduler.state_dict(),
                 "val_acc":          best_val_acc,
                 "cfg":              cfg,
-            }, out_dir / "best_sft_vera.pt")
+            }
+            if ema is not None:
+                best_payload["ema_state"] = ema.state_dict()
+            torch.save(best_payload, out_dir / "best_sft_vera.pt")
             print(f"  ✓ best checkpoint saved (val_acc={best_val_acc:.3f})")
         else:
             patience_counter += 1
@@ -527,13 +618,16 @@ def train(cfg: dict, resume_from: Optional[str] = None):
 
         # ── Periodic snapshot ─────────────────────────────────────────────────
         if epoch % cfg["training"].get("save_every", 10) == 0:
-            torch.save({
+            snap = {
                 "epoch":            epoch,
                 "model_state":      model.state_dict(),
                 "optimizer_state":  optimizer.state_dict(),
                 "scheduler_state":  scheduler.state_dict(),
                 "cfg":              cfg,
-            }, out_dir / f"sft_vera_epoch{epoch:04d}.pt")
+            }
+            if ema is not None:
+                snap["ema_state"] = ema.state_dict()
+            torch.save(snap, out_dir / f"sft_vera_epoch{epoch:04d}.pt")
 
     print(f"\n[sft_vera] Done. Best val acc: {best_val_acc:.3f}")
 

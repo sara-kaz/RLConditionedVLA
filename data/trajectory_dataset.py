@@ -573,15 +573,15 @@ class TrajectoryDataset(Dataset):
             T.ToTensor(),
             _norm,
         ])
-        # Train-only: reduces overfitting to exact RGB textures on held-out episodes.
+        # Train-only: reduces RGB memorisation without starving an unfrozen ViT.
         self._transform_train = T.Compose([
             T.Resize((img_size, img_size)),
             T.RandomApply(
-                [T.ColorJitter(brightness=0.22, contrast=0.22, saturation=0.14, hue=0.03)],
-                p=0.95,
+                [T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.12, hue=0.025)],
+                p=0.9,
             ),
-            T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 0.35))], p=0.15),
-            T.RandomGrayscale(p=0.06),
+            T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 0.3))], p=0.08),
+            T.RandomGrayscale(p=0.04),
             T.ToTensor(),
             _norm,
         ])

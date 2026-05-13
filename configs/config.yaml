@@ -2,6 +2,17 @@
 # Vision-Language-Language-Action model with dual semantic+numerical feedback.
 # DEFAULT: Language-Table (Lynch et al., 2023) — 2-DoF planar push tasks.
 # See "Dataset Presets" section below for CALVIN / MetaWorld overrides.
+#
+# ── Accuracy vs generalisation (quick playbook) ─────────────────────────────
+# • Keep unfreeze_clip_vision: true for LT/CALVIN (frozen ViT often caps accuracy).
+# • If train_acc ≫ val_acc: raise data.train_window_stride (2→3), raise
+#   label_smoothing / weight_decay slightly, or lower training.clip_vision_lr.
+# • If both accs are low: lower train_window_stride to 1, lower dropout /
+#   vision_token_dropout, try label_smoothing 0.05.
+# • training.ema_decay (e.g. 0.999) + validate_with_ema: true smooths weights and
+#   often improves *val* without freezing the backbone; best_sft_vera.pt stores
+#   the EMA-averaged weights when validate_with_ema is on.
+# • More real episodes + diverse tasks beats any hyperparameter tweak.
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:
@@ -13,19 +24,13 @@ model:
   fusion_heads:   8           # attention heads in fusion transformer
   d_model:        256         # shared embedding dimension
   d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
-  dropout:        0.22       # fusion + heads — higher p curbs train-only memorisation
-  # Dropout on projected CLIP vision tokens before fusion (train-only). Strong
-  # regulariser when train acc ≫ val acc; set 0.0 to disable.
-  vision_token_dropout: 0.14
-  freeze_clip:    true        # keep CLIP backbone frozen (recommended)
-  unfreeze_clip_vision: false # true adapts ViT to LT/CALVIN look but often overfits
-                              # small episode splits (train ~0.97, val ~0.5). Prefer
-                              # false + vision_token_dropout + train_window_stride;
-                              # set true only if val plateaus low with frozen vision.
+  dropout:        0.18       # fusion + heads — middle ground
+  vision_token_dropout: 0.08  # on projected vision tokens (train only); 0 to disable
+  freeze_clip:    true        # text frozen; vision follows unfreeze_clip_vision
+  unfreeze_clip_vision: true  # needed for strong LT/CALVIN accuracy vs ImageNet ViT
   action_dim:     2           # continuous action vector dimension — MUST match dataset
                               # Language-Table=2 [Δx,Δy]  MetaWorld=4  CALVIN=7
-  chunk_size:     2           # K>1 multiplies CE targets; K=4 can overfit temporal shortcuts.
-                              # K=2 is a middle ground; use 1 for simplest BC / less capacity.
+  chunk_size:     4           # π0-style multi-step CE; use 2 or 1 if you see temporal overfit
 
 # ── VERA-Specific Settings ─────────────────────────────────────────────────────
 vera:
@@ -50,7 +55,7 @@ vera:
   # MSE between predicted action_vec and expert's executed action vector.
   # Only active when dataset supplies action_vectors (CALVIN, Language-Table, MetaWorld).
   # Set to 0.0 to ablate the regression head (discrete-only baseline).
-  regression_loss_coef:   0.35  # slightly lower — MSE on continuous actions can overfit
+  regression_loss_coef:   0.5   # restore if continuous head helps your dataset
 
   # Language-Table 8-bin angle-quantised action vocabulary.
   # Bins correspond to arctan2(Δy,Δx) quantised into 8 equal sectors (π/4 each).
@@ -78,9 +83,9 @@ data:
   synthetic_episodes:  200      # episodes to generate when no real data provided
   ep_len:              30       # average episode length for synthetic data
   img_size:            224      # resize all frames to this square size
-  augment_train:       true     # train-only ColorJitter (see TrajectoryDataset); improves val generalisation
-  train_window_stride: 2        # use every 2nd timestep on train only — fewer redundant windows / episode
-  augment_noise_std:   0.018    # Gaussian noise on normalised frames (train only); 0 disables
+  augment_train:       true
+  train_window_stride: 2     # train only: fewer correlated windows; use 1 for max train signal
+  augment_noise_std:   0.014 # train only; 0 disables
 
 # ── Supervised Fine-Tuning (Behavioural Cloning) ──────────────────────────────
 training:
@@ -89,10 +94,10 @@ training:
   batch_size:            32
   lr:                    3e-4
   lr_min:                1e-6
-  weight_decay:          8e-4   # L2 on weights — helps when model memorises train episodes
-  label_smoothing:       0.10   # softer targets — reduces overconfident train fitting
+  weight_decay:          6e-4
+  label_smoothing:       0.08
   grad_clip:             1.0
-  val_fraction:          0.15   # slightly larger held-out set — stabler val curve + less train data
+  val_fraction:          0.12   # slightly more val stability; 0.1 if you need every episode for train
   split_seed:            42    # fixed seed for episode-level train/val split
                                # ensures identical split on resume — prevents
                                # inflated val_acc from cross-run window leakage
@@ -102,6 +107,10 @@ training:
   early_stopping_patience: 25   # stop after N epochs with no val_acc improvement
   clip_vision_lr:        2e-6   # LR for unfrozen CLIP vision — slow adaptation;
                                  # 3e-6 still allowed train≫val; 2e-6 is gentler for Colab reruns.
+  # Exponential moving average: often lifts val accuracy vs raw online weights.
+  # Set ema_decay to 0 to disable.
+  ema_decay:             0.999
+  validate_with_ema:     true   # if true, val metrics + best checkpoint use EMA weights
 
 # ── Online RL Fine-Tuning ──────────────────────────────────────────────────────
 rl:
