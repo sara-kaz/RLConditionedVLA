@@ -27,6 +27,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -143,8 +144,14 @@ def build_dataloaders(cfg: dict, device: str):
     # a checkpoint (model already trained on adjacent windows).
     # Splitting episodes first and building two separate datasets fully prevents
     # cross-split episode leakage and gives consistent metrics across restarts.
-    val_frac   = cfg["training"].get("val_fraction", 0.1)
-    split_seed = cfg["training"].get("split_seed", 42)   # fixed across runs
+    val_frac = cfg["training"].get("val_fraction", 0.1)
+    t_tr = cfg["training"]
+    # Episode shuffle seed: explicit split_seed if set; else training.seed so
+    # multi-seed Colab runs do not all share the same val episode set.
+    if t_tr.get("split_seed", None) is not None:
+        split_seed = int(t_tr["split_seed"])
+    else:
+        split_seed = int(t_tr.get("seed", 42))
     rng = random.Random(split_seed)
     ep_indices = list(range(len(episodes)))
     rng.shuffle(ep_indices)
@@ -407,13 +414,20 @@ def train(cfg: dict, resume_from: Optional[str] = None):
     device = resolve_device(cfg)
     print(f"[sft_vera] device = {device}")
 
+    t_cfg = cfg["training"]
+    run_seed = int(t_cfg.get("seed", 42))
+    random.seed(run_seed)
+    np.random.seed(run_seed)
+    torch.manual_seed(run_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(run_seed)
+
     train_loader, val_loader = build_dataloaders(cfg, device)
     model = build_model(cfg).to(device)
     print(f"[model] {model.param_summary()}")
 
     # Cast to float/int — YAML round-trips scientific notation (e.g. 1e-4) as
     # strings in PyYAML 6.x, which causes TypeError in torch.optim.AdamW.
-    t_cfg = cfg["training"]
     lr           = float(t_cfg["lr"])
     weight_decay = float(t_cfg.get("weight_decay", 1e-4))
     total_epochs = int(t_cfg["epochs"])
@@ -630,6 +644,21 @@ def train(cfg: dict, resume_from: Optional[str] = None):
             torch.save(snap, out_dir / f"sft_vera_epoch{epoch:04d}.pt")
 
     print(f"\n[sft_vera] Done. Best val acc: {best_val_acc:.3f}")
+
+    # ── Mark best checkpoint as training-complete ─────────────────────────────
+    # The ablation runner reads this flag to distinguish a finished run (skip)
+    # from an interrupted one (resume).  We patch it in-place so the best
+    # model weights are preserved exactly as saved during training.
+    best_ckpt_path = out_dir / "best_sft_vera.pt"
+    if best_ckpt_path.exists():
+        try:
+            payload = torch.load(best_ckpt_path, map_location="cpu")
+            payload["training_complete"] = True
+            torch.save(payload, best_ckpt_path)
+        except Exception as e:
+            print(f"[sft_vera] Warning: could not mark checkpoint complete: {e}")
+
+    return best_val_acc
 
 
 # Alias used by run_ablations.py and run_calvin_ablations.py
