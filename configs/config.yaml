@@ -100,7 +100,7 @@ training:
   grad_clip:             1.0
   val_fraction:          0.1    # more train episodes → often better val at modest data sizes
   seed:                  42     # torch/numpy init; also episode split if split_seed omitted
-  split_seed:            null   # int override for train/val episode shuffle only; null → use seed
+  split_seed:            42     # fixed episode split seed — must be identical across all runs
   num_workers:           2
   save_every:            10
   output_dir:            checkpoints/
