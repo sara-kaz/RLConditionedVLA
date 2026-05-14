@@ -4,15 +4,16 @@
 # See "Dataset Presets" section below for CALVIN / MetaWorld overrides.
 #
 # ── Accuracy vs generalisation (quick playbook) ─────────────────────────────
-# • Keep unfreeze_clip_vision: true for LT/CALVIN (frozen ViT often caps accuracy).
-# • If train_acc ≫ val_acc: raise data.train_window_stride (2→3), raise
-#   label_smoothing / weight_decay slightly, or lower training.clip_vision_lr.
-# • If both accs are low: lower train_window_stride to 1, lower dropout /
-#   vision_token_dropout, try label_smoothing 0.05.
-# • training.ema_decay (e.g. 0.999) + validate_with_ema: true smooths weights and
-#   often improves *val* without freezing the backbone; best_sft_vera.pt stores
-#   the EMA-averaged weights when validate_with_ema is on.
-# • More real episodes + diverse tasks beats any hyperparameter tweak.
+# • LT held-out discrete 8-way accuracy often plateaus ~0.45–0.55; random ≈0.125.
+# • For higher val: data.train_window_stride=1 (stride 2 ~halves BC supervision),
+#   training.val_fraction≈0.1, mild label_smoothing (0.05), clip_vision_lr≈3e-6.
+# • If train ≫ val after epoch ~40: raise weight_decay/dropout, shorten patience,
+#   or set train_window_stride=2 (less overfit, fewer train windows — trade-off).
+# • training.seed controls torch/numpy AND (unless split_seed is set) the episode
+#   train/val shuffle — set a different seed per ablation run for varied splits.
+# • ema_decay>0 + validate_with_ema: true can smooth val; set ema_decay: 0 to use
+#   online weights only for val + best checkpoint (often simpler for BC).
+# • More episodes / tasks beats any single hyperparameter tweak.
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 model:
@@ -24,8 +25,8 @@ model:
   fusion_heads:   8           # attention heads in fusion transformer
   d_model:        256         # shared embedding dimension
   d_ff_scale:     4           # feedforward dim = d_model * d_ff_scale
-  dropout:        0.18       # fusion + heads — middle ground
-  vision_token_dropout: 0.08  # on projected vision tokens (train only); 0 to disable
+  dropout:        0.14       # lower if val plateaus low; raise if train≫val late
+  vision_token_dropout: 0.04  # train only; 0 disables
   freeze_clip:    true        # text frozen; vision follows unfreeze_clip_vision
   unfreeze_clip_vision: true  # needed for strong LT/CALVIN accuracy vs ImageNet ViT
   action_dim:     2           # continuous action vector dimension — MUST match dataset
@@ -46,10 +47,10 @@ vera:
   # Auxiliary contrastive alignment loss coefficient (λ_align)
   # Applied to BOTH action and consequence alignment terms (averaged).
   #
-  # Why 0.05 (default): on Language-Table, InfoNCE stays near log(B)≈3.46 (weak
-  # in-batch reward contrast). At λ=0.1 that is ~0.35 loss units of mostly noise
-  # vs CE; 0.05 halves that while keeping projection heads active. Set 0.0 to ablate.
-  alignment_loss_coef:    0.05
+  # Why 0.03: on Language-Table, InfoNCE stays near log(B)≈3.46 (weak in-batch contrast).
+  # A smaller λ_align reduces a near-constant ~0.17 loss floor competing with CE.
+  # Set 0.0 to ablate alignment entirely.
+  alignment_loss_coef:    0.03  # InfoNCE ~flat on LT; smaller λ frees CE capacity
 
   # Continuous action regression loss coefficient (λ_reg)
   # MSE between predicted action_vec and expert's executed action vector.
@@ -84,8 +85,8 @@ data:
   ep_len:              30       # average episode length for synthetic data
   img_size:            224      # resize all frames to this square size
   augment_train:       true
-  train_window_stride: 2     # train only: fewer correlated windows; use 1 for max train signal
-  augment_noise_std:   0.014 # train only; 0 disables
+  train_window_stride: 1     # 1 = every timestep (max BC signal); 2–3 only if train≫val
+  augment_noise_std:   0.006 # train only; 0 disables
 
 # ── Supervised Fine-Tuning (Behavioural Cloning) ──────────────────────────────
 training:
@@ -94,23 +95,20 @@ training:
   batch_size:            32
   lr:                    3e-4
   lr_min:                1e-6
-  weight_decay:          6e-4
-  label_smoothing:       0.08
+  weight_decay:          5e-4
+  label_smoothing:       0.05   # softer targets cap peak acc; 0.05 helps LT discrete CE
   grad_clip:             1.0
-  val_fraction:          0.12   # slightly more val stability; 0.1 if you need every episode for train
-  split_seed:            42    # fixed seed for episode-level train/val split
-                               # ensures identical split on resume — prevents
-                               # inflated val_acc from cross-run window leakage
+  val_fraction:          0.1    # more train episodes → often better val at modest data sizes
+  seed:                  42     # torch/numpy init; also episode split if split_seed omitted
+  split_seed:            null   # int override for train/val episode shuffle only; null → use seed
   num_workers:           2
   save_every:            10
   output_dir:            checkpoints/
-  early_stopping_patience: 25   # stop after N epochs with no val_acc improvement
-  clip_vision_lr:        2e-6   # LR for unfrozen CLIP vision — slow adaptation;
-                                 # 3e-6 still allowed train≫val; 2e-6 is gentler for Colab reruns.
-  # Exponential moving average: often lifts val accuracy vs raw online weights.
-  # Set ema_decay to 0 to disable.
-  ema_decay:             0.999
-  validate_with_ema:     true   # if true, val metrics + best checkpoint use EMA weights
+  early_stopping_patience: 18   # tighter: val often peaks mid-training then drifts (overfit)
+  clip_vision_lr:        3e-6   # unfrozen ViT; lower to 2e-6 if train≫val
+  # EMA: set ema_decay to 0 to disable (val + best_ckpt = online weights only).
+  ema_decay:             0
+  validate_with_ema:     false  # ignored when ema_decay is 0
 
 # ── Online RL Fine-Tuning ──────────────────────────────────────────────────────
 rl:
