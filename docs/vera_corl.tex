@@ -137,15 +137,14 @@ $\approx\!124$M CLIP backbone (Mode A), \modelname\ trains on a single 8\,GB GPU
 for out-of-distribution visual domains, CLIP vision can optionally be
 fine-tuned ($+86.2$M, Mode B) while keeping the text encoder frozen.
 On Language-Table~\citep{lynch2023languagetable}
-(3,000 real episodes from the official Google Research GCS dataset),
+(3,000 simulated episodes rendered from the Language-Table environment),
 \modelname\ achieves $69.0\%\,(\pm0.8\%)$ validation accuracy versus
 $68.3\%\,(\pm0.7\%)$ for a strong behavioural-cloning baseline---a
 consistent $+0.65$\,pp gain across all three seeds---and six ablation
 variants confirm that the full five-stream architecture outperforms
 every partial configuration.
 Full-convergence results across all 18 condition$\times$seed runs are
-ongoing; the numbers reported here represent completed seeds from the
-real-data training run.
+ongoing; the numbers reported here represent completed seeds.
 The full nine-variant ablation study spanning both Language-Table and
 CALVIN D$\to$D~\citep{mees2022calvin} is ongoing.
 \end{abstract}
@@ -581,16 +580,15 @@ Language-Table is a language-conditioned tabletop manipulation benchmark
 in which a robot arm must push blocks to goal positions specified by
 natural-language instructions (e.g.\ \textit{``push the star near the moon''}).
 Actions are 2-DoF end-effector displacements $\mathbf{v}\!\in\![-1,1]^2$.
-We train on \textbf{3,000 episodes} sampled from the official Language-Table
-dataset released by Google Research
-(\texttt{gs://gresearch/robotics/language\_table/0.0.1}),
+We train on \textbf{3,000 simulated episodes} rendered from the Language-Table
+simulation environment~\citep{lynch2023languagetable},
 yielding approximately 43,000 training windows after a 90/10 episode-level split.
-Overhead RGB frames ($360{\times}640$) are resized to $224{\times}224$ for CLIP;
-natural-language instructions are decoded from 512-dim character arrays.
+Overhead RGB frames are resized to $224{\times}224$ for CLIP;
+natural-language instructions specify the push goal for each episode.
 We discretize actions into an \textbf{8-bin vocabulary}
 ($x{+}$, $x{-}$, $y{+}$, $y{-}$, combined diagonals, stop)
-and use a geometric state-delta $\Delta d$ computed from
-consecutive effector-translation norms as the distance-to-goal signal.
+and use a geometric state-delta $\Delta d$ approximated from
+consecutive reward differences as the distance-to-goal signal.
 Language-Table serves as our \textbf{primary evaluation environment}:
 results are reported in Table~\ref{tab:lt_results}.
 
@@ -622,7 +620,8 @@ structure and current completion status.
 \subsection{Language-Table Results}
 \label{sec:lt_results}
 
-Table~\ref{tab:lt_results} reports all six completed Language-Table conditions.
+Table~\ref{tab:lt_results} reports all six completed Language-Table conditions,
+trained and evaluated on 3,000 simulated Language-Table episodes.
 The no-language-feedback condition is the most diagnostic comparison:
 it retains the temporal history transformer and reward gate while removing
 \emph{only} the language-alignment streams (\Lact\ and \Lexp), directly
@@ -632,9 +631,8 @@ isolating their contribution above architectural complexity alone.
 \centering
 \caption{
   \textbf{Language-Table validation action-classification accuracy} (\%, 3 seeds).
-  Data: 3,000 episodes from the official Language-Table GCS dataset
-  (\texttt{gs://gresearch/robotics/language\_table/0.0.1}; \textasciitilde43k windows,
-  overhead RGB $360{\times}640$ resized to $224{\times}224$).
+  Data: 3,000 simulated episodes rendered from the Language-Table environment
+  (\textasciitilde43k windows, overhead RGB resized to $224{\times}224$).
   Higher is better; random baseline $= 12.5\%$ (1-of-8 bins).
   Full \modelname\ achieves $+0.65$\,pp over BC across all three seeds.
   $^\dagger$Removes both \Lact\ and \Lexp; temporal history TF and reward gate remain.
@@ -822,7 +820,7 @@ We presented \modelname\ (Vision-Embodied Reasoning-Action), a five-stream
 closed-loop robot policy that continuously re-injects the embodied consequences
 of past actions back into the decision process via language---the same modality
 CLIP was pretrained on, requiring no additional pretraining.
-On Language-Table (3 seeds, 3,000 real GCS episodes), Full \modelname\ achieves
+On Language-Table (3 seeds, 3,000 simulated episodes), Full \modelname\ achieves
 $69.0\%\,(\pm0.8\%)$ validation accuracy versus $68.3\%\,(\pm0.7\%)$ for the
 BC baseline, a consistent $+0.65$\,pp gain across all three seeds.
 Six ablation conditions confirm that the full five-stream architecture outperforms
@@ -854,10 +852,9 @@ A learned verbalizer could capture finer distinctions at higher compute cost.
 
 \textbf{Ongoing experiments.}
 Table~\ref{tab:lt_results} reports six Language-Table ablation conditions
-(3 seeds each) on 3,000 real episodes from the official Google Research GCS dataset.
-Full-convergence training across all 18 condition$\times$seed runs is ongoing
-(Mode B, CLIP vision fine-tuned, $\sim\!384$\,s/epoch on A100); results will
-be updated as each seed completes.
+(3 seeds each) on 3,000 simulated episodes rendered from the Language-Table environment.
+Full-convergence training across all 18 condition$\times$seed runs is ongoing;
+results will be updated as each seed completes.
 The remaining three conditions (no reward gate, no regression head,
 corrupted \Lexp) and all CALVIN D$\to$D entries are also in progress.
 
