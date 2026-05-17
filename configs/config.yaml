@@ -47,10 +47,12 @@ vera:
   # Auxiliary contrastive alignment loss coefficient (λ_align)
   # Applied to BOTH action and consequence alignment terms (averaged).
   #
-  # Why 0.03: on Language-Table, InfoNCE stays near log(B)≈3.46 (weak in-batch contrast).
-  # A smaller λ_align reduces a near-constant ~0.17 loss floor competing with CE.
+  # Why 0.10: per-episode reward normalisation has been removed from the data
+  # loader, so InfoNCE now sees genuine cross-episode reward diversity.
+  # A larger λ_align (0.10 vs former 0.03) ensures the alignment gradient
+  # is not drowned out by the BC cross-entropy term (~2.0 weight).
   # Set 0.0 to ablate alignment entirely.
-  alignment_loss_coef:    0.03  # InfoNCE ~flat on LT; smaller λ frees CE capacity
+  alignment_loss_coef:    0.10  # raised from 0.03; raw rewards restore InfoNCE signal
 
   # Continuous action regression loss coefficient (λ_reg)
   # MSE between predicted action_vec and expert's executed action vector.
@@ -101,7 +103,7 @@ training:
   val_fraction:          0.1    # more train episodes → often better val at modest data sizes
   seed:                  42     # torch/numpy init; also episode split if split_seed omitted
   split_seed:            42     # fixed episode split seed — must be identical across all runs
-  num_workers:           2
+  num_workers:           0      # 0 = main-process loading; avoids CoW RAM duplication in Colab
   save_every:            10
   output_dir:            checkpoints/
   early_stopping_patience: 18   # tighter: val often peaks mid-training then drifts (overfit)

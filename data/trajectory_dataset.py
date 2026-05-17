@@ -308,30 +308,20 @@ def load_language_table(root: str, skip_stop_steps: bool = True) -> List[Dict]:
 
         rewards_arr = np.array(rewards, dtype=np.float32)
 
-        # ── Normalise LT rewards from [0, ~0.2] → [0, 1] ─────────────────────
-        # Language-Table shaped rewards top out around 0.2 (goal reached).
-        # Leaving them raw causes two problems:
-        #   1. The reward gate sigmoid(MLP(r)) ≈ 0.5 for all steps (no range).
-        #   2. verbalize_consequence's "high" threshold (≥1.0) is never reached.
-        #   3. InfoNCE exponential weights exp(5·r) give only 2.7× contrast vs
-        #      148× when r ∈ [0,1].
-        # Dividing by the episode max (or 0.2 if flat) maps rewards to [0,1]
-        # and makes all three mechanisms discriminative.
-        ep_max = float(rewards_arr.max())
-        if ep_max > 1e-6:
-            rewards_arr = (rewards_arr / ep_max).astype(np.float32)
-        # (episodes with all-zero rewards stay at 0 — no division by zero)
-
         # ── Pseudo state_delta from consecutive reward differences ────────────
-        # Language-Table rewards are shaped ∈ [0, 1] after normalisation above.
-        # Δr > 0 → agent moved closer to goal → negative delta_dist by convention.
+        # Raw LT rewards are in [0, ~0.2].  We keep them raw so that
+        # cross-episode reward diversity is preserved for InfoNCE weighting.
+        # Per-episode normalisation (÷ ep_max) was removed because it maps
+        # every episode's peak to 1.0, collapsing the signal that InfoNCE
+        # needs to distinguish high- from low-reward trajectories.
         #
-        # Scale factor 3.0 maps a typical Δr ≈ 0.05 to δd ≈ -0.15, which
-        # falls in the "significantly" magnitude bin of verbalize_consequence.
+        # Scale factor 15.0 compensates for the raw [0,~0.2] range so that
+        # a typical Δr ≈ 0.01 maps to δd ≈ -0.15, keeping verbalize_consequence
+        # magnitude bins ("slightly" / "significantly") calibrated as before.
         # Clipping at ±0.5 avoids outliers from noisy reward signals.
         delta_r    = np.zeros_like(rewards_arr)
         delta_r[1:] = rewards_arr[1:] - rewards_arr[:-1]
-        state_deltas = np.clip(-delta_r * 3.0, -0.5, 0.5).astype(np.float32)
+        state_deltas = np.clip(-delta_r * 15.0, -0.5, 0.5).astype(np.float32)
 
         episodes.append({
             "frames":         np.stack(frames),

@@ -113,12 +113,23 @@ def resolve_device(cfg: dict) -> str:
     return spec
 
 
-def build_dataloaders(cfg: dict, device: str):
+def build_dataloaders(cfg: dict, device: str,
+                       preloaded_episodes: Optional[list] = None):
+    """
+    Build train/val DataLoaders.
+
+    preloaded_episodes : if supplied, skip disk I/O entirely and use this list
+                         directly.  Pass the same object for all seeds/conditions
+                         that share the same dataset to avoid re-loading.
+    """
     data_cfg  = cfg["data"]
     ep_path   = data_cfg.get("episodes_path")
     dataset_type = data_cfg.get("dataset_type", "pkl").lower()  # "pkl"|"language_table"|"calvin"
 
-    if ep_path and Path(ep_path).exists():
+    if preloaded_episodes is not None:
+        episodes = preloaded_episodes
+        print(f"[data] Using {len(episodes)} pre-loaded episodes (skipping disk I/O)")
+    elif ep_path and Path(ep_path).exists():
         if dataset_type == "language_table":
             episodes = load_language_table(ep_path)
             print(f"[data] Loaded {len(episodes)} Language-Table episodes from {ep_path}")
@@ -402,14 +413,19 @@ def run_epoch(
 
 # ── Main training function ────────────────────────────────────────────────────
 
-def train(cfg: dict, resume_from: Optional[str] = None):
+def train(cfg: dict, resume_from: Optional[str] = None,
+          preloaded_episodes: Optional[list] = None):
     """
     Train VERA with optional warm-restart from a saved checkpoint.
 
-    resume_from : path to a .pt file produced by this trainer.
-                  If provided, loads model weights (+ optimizer/scheduler
-                  states when available) and continues from the saved epoch.
-                  The existing sft_vera_log.json is preserved and appended to.
+    resume_from        : path to a .pt file produced by this trainer.
+                         If provided, loads model weights (+ optimizer/scheduler
+                         states when available) and continues from the saved epoch.
+                         The existing sft_vera_log.json is preserved and appended to.
+    preloaded_episodes : pre-loaded episode list to pass straight to build_dataloaders,
+                         bypassing disk I/O.  Reuse across seeds/conditions to avoid
+                         loading the dataset 18 times and to eliminate the 3× RAM
+                         spike caused by DataLoader worker process forking.
     """
     device = resolve_device(cfg)
     print(f"[sft_vera] device = {device}")
@@ -422,7 +438,8 @@ def train(cfg: dict, resume_from: Optional[str] = None):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(run_seed)
 
-    train_loader, val_loader = build_dataloaders(cfg, device)
+    train_loader, val_loader = build_dataloaders(cfg, device,
+                                                  preloaded_episodes=preloaded_episodes)
     model = build_model(cfg).to(device)
     print(f"[model] {model.param_summary()}")
 

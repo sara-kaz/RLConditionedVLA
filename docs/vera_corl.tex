@@ -539,12 +539,12 @@ The composite supervised fine-tuning loss is:
   = \mathcal{L}_{\mathrm{BC}}
   + \lambda_{\mathrm{align}}\,\mathcal{L}_{\mathrm{align}}
   + \lambda_{\mathrm{reg}}\,\mathcal{L}_{\mathrm{reg}},
-  \quad \lambda_{\mathrm{align}}{=}0.03,\;\lambda_{\mathrm{reg}}{=}0.5
+  \quad \lambda_{\mathrm{align}}{=}0.10,\;\lambda_{\mathrm{reg}}{=}0.5
   \label{eq:sft_loss}
 \end{equation}
-The small $\lambda_{\mathrm{align}}{=}0.03$ reflects that Language-Table's
-shaped rewards (${\approx}0.01$--$0.05$) provide weak in-batch contrast;
-a larger coefficient competes with the BC term without adding useful gradient.
+We set $\lambda_{\mathrm{align}}{=}0.10$ so the InfoNCE gradient is not
+overwhelmed by the BC cross-entropy term; raw (un-normalised) Language-Table
+rewards preserve cross-episode diversity that makes in-batch contrast meaningful.
 
 \subsection{Behavioural Cloning (SFT)}
 Training uses cross-entropy with label smoothing $\epsilon{=}0.05$,
@@ -988,7 +988,7 @@ Attention mask          & None  & Bidirectional (full) — no causal mask \\
 $\eta$                  & $3\!\times\!10^{-4}$ & AdamW LR (cosine to $10^{-6}$) \\
 Epochs (max)            & 80    & Early-stopping patience = 25 \\
 Batch size              & 32    & \\
-$\lambda_\mathrm{align}$& 0.03  & InfoNCE weight (small: shaped LT rewards give weak in-batch contrast) \\
+$\lambda_\mathrm{align}$& 0.10  & InfoNCE weight; raw rewards preserve cross-episode contrast \\
 $\lambda_\mathrm{reg}$  & 0.5   & Regression MSE weight \\
 InfoNCE weighting       & $\exp(5\tilde{r})$ & Exponential; $\tilde{r}$ = batch-normalised reward \\
 Reward gate scale $\gamma_g$ & 6.0 & Pre-scales $\tilde{r}$ before sigmoid gate MLP \\
