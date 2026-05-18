@@ -1,5 +1,5 @@
 %% ============================================================================
-%%  VERA: Vision-Experience-Reasoning-Action
+%%  VERA: Vision-Embodied Knowledge-Reasoning-Action
 %%  CoRL 2026 Camera-Ready Submission
 %%  Authors: Sara Aly
 %%
@@ -62,7 +62,7 @@
 %% ── PDF metadata ─────────────────────────────────────────────────────────────
 %% The pdftitle MUST match the title on the OpenReview submission form.
 \hypersetup{
-  pdftitle  = {VERA: Vision-Embodied Reasoning-Action for Closed-Loop Robot Manipulation},
+  pdftitle  = {VERA: Vision-Embodied Knowledge-Reasoning-Action for Closed-Loop Robot Manipulation},
   pdfauthor = {Sara Aly},
 }
 
@@ -82,7 +82,7 @@
 %% ============================================================================
 %%  Title — must match OpenReview exactly (same string as pdftitle above)
 %% ============================================================================
-\title{VERA: Vision-Embodied Reasoning-Action for Closed-Loop Robot Manipulation}
+\title{VERA: Vision-Embodied Knowledge-Reasoning-Action for Closed-Loop Robot Manipulation}
 
 %% Authors — non-anonymous; visible because [final] is active.
 \author{
@@ -103,7 +103,7 @@ stateless function of the current camera frame and task instruction,
 discarding two informative signals that arise from prior interaction:
 \emph{(i)} what action the agent attempted at the previous step, and
 \emph{(ii)} whether that action moved it closer to the goal.
-We present \modelname\ (Vision-Embodied Reasoning-Action), a
+We present \modelname\ (Vision-Embodied Knowledge-Reasoning-Action), a
 five-stream closed-loop robot policy that continuously re-injects both
 signals back into the decision process.
 The previous action is narrated from a fixed vocabulary and
@@ -122,7 +122,7 @@ direct end-effector command prediction alongside the discrete policy.
 All five streams are fused by a six-layer LLaMA-style
 \emph{bidirectional} Transformer (RMSNorm + RoPE + SwiGLU) augmented
 with ViLT modality-type embeddings; removing the causal mask allows the
-action-narration and experience tokens to attend to the full visual
+action-narration and embodied knowledge tokens to attend to the full visual
 context---a critical correction for offline behavioural cloning.
 An expand-compress action head (CoT-lite bottleneck, inspired by
 VITA-VLA) combined with $K{=}4$ action chunking ($\pi_0$/GR-1 style)
@@ -131,7 +131,7 @@ token, yielding $4{\times}$ the supervised signal per step while
 enforcing temporal consistency.
 An auxiliary reward-weighted InfoNCE loss---with exponential reward
 weighting $\exp(5r)$ and per-batch normalisation---aligns successful
-experience embeddings toward the goal instruction during training.
+embodied knowledge embeddings toward the goal instruction during training.
 With only $\approx\!7.3$M trainable parameters atop a frozen
 $\approx\!124$M CLIP backbone (Mode A), \modelname\ trains on a single 8\,GB GPU;
 for out-of-distribution visual domains, CLIP vision can optionally be
@@ -216,7 +216,7 @@ signal per step while enforcing temporal consistency across predicted action win
 \paragraph{Vision-Language-Action Models.}
 \citet{brohan2023rt2}, \citet{octo2024}, \citet{kim2024openvla},
 and \citet{black2024pi0} are stateless at inference.
-None closes the experience--reasoning feedback loop.
+None closes the embodied knowledge--reasoning feedback loop.
 
 \paragraph{$\pi_{0.5}$ and open-world generalisation.}
 \citet{hejna2025pi05} encode prior actions autoregressively
@@ -380,7 +380,7 @@ with $T{=}3$, $H{=}4$: $S = 1{+}1{+}1{+}3{+}4{+}1 = 11$ tokens.
 Following \citet{kim2021vilt}, each token receives a learnable
 \emph{modality-type embedding} $\mathbf{m}^{(s)}\!\in\!\mathbb{R}^{256}$
 from five types: instruction/CLS (0), action narration (1), vision (2),
-history (3), experience (4).
+history (3), embodied knowledge (4).
 
 \subsection{LLaMA Fusion Transformer}
 \label{sec:fusion}
@@ -398,7 +398,7 @@ All 11 tokens attend to each other in every layer.
 This is critical for correctness: VERA is a behavioural-cloning policy, not
 an autoregressive token generator.
 Under a causal mask, the action-narration token $E_{\mathrm{act}}$ (position~1) and
-experience token $E_{\mathrm{exp}}$ (position~2) can only attend to the instruction
+embodied knowledge token $E_{\mathrm{emb}}$ (position~2) can only attend to the instruction
 (position~0)---they are entirely blind to the three vision tokens ($V_1, V_2, V_3$)
 and four history tokens ($H_1$--$H_4$).
 This defeats the purpose of Streams~3a and~3b: feedback tokens that cannot
@@ -471,7 +471,7 @@ $d_{\mathrm{act}}\!\in\!\{2,4,7\}$ for Language-Table, MetaWorld, CALVIN.
 
 Two latent errors arise in a naive implementation.
 \emph{Error~1 (causal mask)}: under a left-to-right causal mask,
-$E_{\mathrm{act}}$ (pos~1) and $E_{\mathrm{exp}}$ (pos~2) are entirely blind
+$E_{\mathrm{act}}$ (pos~1) and $E_{\mathrm{emb}}$ (pos~2) are entirely blind
 to the three vision tokens and four history tokens---defeating their purpose
 as closed-loop signals.
 \emph{Fix}: remove the causal mask; VERA is a BC classifier, not an autoregressive
@@ -650,11 +650,11 @@ isolating their contribution above architectural complexity alone.
 \midrule
 BC/SFT baseline (no lang, no hist TF)
   & 68.9 & 67.4 & 68.6 & $68.3 \pm 0.7$ \\
-No E\textsubscript{exp} / Stream 3b (action narration only)
+No E\textsubscript{emb} / Stream 3b (action narration only)
   & 69.0 & 67.5 & 69.0 & $68.5 \pm 0.7$ \\
 No language feedback$^\dagger$
   & 69.6 & 67.6 & 68.6 & $68.6 \pm 0.8$ \\
-No E\textsubscript{act} / Stream 3a (experience token only)
+No E\textsubscript{act} / Stream 3a (embodied knowledge token only)
   & 69.6 & 67.6 & 68.6 & $68.6 \pm 0.8$ \\
 No history sub-transformer$^\ddagger$ (flat positional hist)
   & 69.6 & 67.6 & 68.7 & $68.6 \pm 0.8$ \\
@@ -687,9 +687,9 @@ During training, the reward-weighted InfoNCE loss produces two cosine
 similarity diagnostics logged per epoch:
 $\cos(\mathbf{e}_{3a}, \mathbf{e}_2)$ tracks how well action narrations
 align with the instruction, and $\cos(\mathbf{e}_{3b}, \mathbf{e}_2)$
-tracks experience alignment.
+tracks embodied knowledge alignment.
 For Full \modelname\ both cosines rise monotonically over training,
-confirming that the alignment loss progressively draws successful-experience
+confirming that the alignment loss progressively draws successful embodied knowledge
 embeddings toward the instruction; the BC baseline exhibits flat cosines
 (no alignment loss), providing a null baseline.
 Alignment cosine curves are plotted in Figure~\ref{fig:cosine} (Appendix~\ref{app:training_dynamics}).
@@ -809,14 +809,14 @@ and received a penalty''} shifts the policy toward a corrective action on the
 next step---closed-loop recovery that is absent in the stateless BC baseline.
 CLS-to-token attention weights (Figure~\ref{fig:attention},
 Appendix~\ref{app:qualitative}) further show that after a failed step \modelname\
-attends more strongly to $E_{\mathrm{exp}}$ and vision tokens, consistent with
+attends more strongly to $E_{\mathrm{emb}}$ and vision tokens, consistent with
 consequence-driven visual re-evaluation.
 
 %% ============================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented \modelname\ (Vision-Embodied Reasoning-Action), a five-stream
+We presented \modelname\ (Vision-Embodied Knowledge-Reasoning-Action), a five-stream
 closed-loop robot policy that continuously re-injects the embodied consequences
 of past actions back into the decision process via language---the same modality
 CLIP was pretrained on, requiring no additional pretraining.
@@ -905,7 +905,7 @@ VERA uses \emph{full bidirectional attention} (no causal mask) in the main
 LLaMA fusion transformer.
 Table~\ref{tab:mask_correct} shows the corrected $11\!\times\!11$ pattern.
 Table~\ref{tab:mask_wrong} shows the original causal mask for comparison,
-illustrating why $E_{\mathrm{act}}$ and $E_{\mathrm{exp}}$ were blind to
+illustrating why $E_{\mathrm{act}}$ and $E_{\mathrm{emb}}$ were blind to
 vision and history under the naive design (see \S\ref{sec:bug}).
 
 \begin{table}[h]
@@ -937,7 +937,7 @@ CLS    & \cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\cmark&\
 \begin{table}[h]
 \centering
 \caption{\textbf{Original (buggy) causal mask} shown for comparison. Under this mask,
-         $E_{\mathrm{act}}$ (row $a$) can only attend to $\ell$, and $E_{\mathrm{exp}}$ (row $c$)
+         $E_{\mathrm{act}}$ (row $a$) can only attend to $\ell$, and $E_{\mathrm{emb}}$ (row $c$)
          can only attend to $\ell$ and $a$---both feedback tokens are blind to all vision and
          history tokens (the \xmark\ cells in their rows).}
 \label{tab:mask_wrong}
@@ -1084,7 +1084,7 @@ Action heads                              & $<$0.001 & Yes \\
 \midrule
 Raw $(a_t,r_t)$ numeric token &
   Bypasses CLIP's semantic structure; model must learn action semantics from scratch. \\
-Single token for action+experience &
+Single token for action+embodied knowledge &
   Act narration (\Lact) and outcome (\Lexp) are orthogonal; conflation prevents
   independent specialisation. Ablations F and G quantify this. \\
 Learned verbalizer (LLM) &
@@ -1201,7 +1201,7 @@ HULC~\citep{mees2022hulc}
 }}
 \caption{Alignment cosine dynamics on Language-Table.
   Rising cosines validate that the InfoNCE loss anchors successful
-  experience tokens near the instruction embedding; flat BC curves serve
+  embodied knowledge tokens near the instruction embedding; flat BC curves serve
   as a null baseline.}
 \label{fig:cosine}
 \end{figure}
