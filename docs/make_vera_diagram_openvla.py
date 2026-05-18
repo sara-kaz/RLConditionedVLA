@@ -155,17 +155,18 @@ txt(MBX + 0.55, MBYT - 0.24, "VERA",
 #  INPUT STREAM BOXES  (outside model)
 # ─────────────────────────────────────────────────────────────────────────────
 stream_info = [
-    ("vis", "Vision",             "3 RGB Frames · 224×224×3"),
-    ("ins", "Instruction",        '"push block left"'),
-    ("act", "Action Narration",   "a_{t−1} text narration"),
-    ("emb", "Embodied Knowledge", "r_{t−1} · Δd_{t−1}"),
-    ("his", "History",            "H=4 (action, reward) pairs"),
+    # (key, stream name, concise example)
+    ("vis", "Vision",             "frames t, t−1, t−2"),
+    ("ins", "Instruction",        '"push block to red region"'),
+    ("act", "Action Narration",   '"I pushed the block left"'),
+    ("emb", "Embodied Knowledge", '"block moved closer to goal"'),
+    ("his", "History",            "(←,0.12)  (←,0.09)  (↑,0.04)  …"),
 ]
 for key, title, sub in stream_info:
     cy = YS[key]; y0 = cy - STRH/2
     rbox(INP_X, y0, INP_W, STRH, fc=C[key], z=4)
-    txt(INP_X + INP_W/2, cy + 0.22, title, fs=9.5, bold=True, z=6)
-    txt(INP_X + INP_W/2, cy - 0.22, sub,   fs=8.0, c="#ECEFF1", z=6)
+    txt(INP_X + INP_W/2, cy + 0.24, title, fs=9.5, bold=True, z=6)
+    txt(INP_X + INP_W/2, cy - 0.24, sub,   fs=7.5, c="#ECEFF1", italic=True, z=6)
 
 # [NEW] badge on Embodied Knowledge
 ey0 = YS["emb"] - STRH/2
@@ -520,9 +521,9 @@ ptxt(MBX + 0.40, MBY + MBH - 0.42, 1.80, 0.38,
 # Input stream boxes
 for key, title, sub in stream_info:
     cy = YS[key]; y0 = cy - STRH/2
-    sub_clean = sub.replace('"', '"').replace('"', '"')
+    sub_clean = sub.replace('“', '"').replace('”', '"')
     pbox(INP_X, y0, INP_W, STRH, fc=C[key],
-         lines=[title, sub_clean], fsizes=[9, 8], bolds={0}, tc="#FFFFFF")
+         lines=[title, sub_clean], fsizes=[9, 7.5], bolds={0}, tc="#FFFFFF")
 
 # [NEW] badge
 ey0 = YS["emb"] - STRH/2
