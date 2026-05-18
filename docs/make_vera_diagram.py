@@ -1,5 +1,9 @@
 """
-VERA Architecture Diagram — v2 (correct: 6-layer fusion, λ_align=0.10)
+VERA Architecture Diagram — v3
+  - 6-layer bidirectional fusion (corrected from 8)
+  - λ_align = 0.10
+  - CLIP Text Encoders clearly marked FROZEN (hatched border)
+  - CLIP ViT-B/32 correctly marked TRAINABLE (fine-tuned at lr=3e-6)
 Run: python3 docs/make_vera_diagram.py
 Outputs: docs/VERA.png
 """
@@ -26,7 +30,8 @@ C_INS   = "#2E7D32"   # Stream 2 Instruction
 C_ACT   = "#E65100"   # Stream 3a Action Narration
 C_EMB   = "#AD1457"   # Stream 3b Consequence  [NEW]
 C_HIS   = "#6A1B9A"   # Stream 4 History
-C_CLIP  = "#37474F"   # CLIP backbone (frozen)
+C_CLIP  = "#37474F"   # CLIP Text backbone (frozen)
+C_VIT   = "#1565C0"   # CLIP ViT vision (trainable, fine-tuned lr=3e-6)
 C_SUB   = "#4527A0"   # Causal sub-transformer
 C_FUSE  = "#1A237E"   # Bidirectional fusion
 C_DIS   = "#BF360C"   # Discrete head
@@ -67,9 +72,27 @@ def new_badge(x, y):
             color=WHITE, fontweight="bold", zorder=8,
             bbox=dict(boxstyle="round,pad=0.18", fc=C_NEW, ec="none"))
 
-def frozen_tag(cx, y, fs=7):
-    ax.text(cx, y, "❄  frozen", ha="center", va="center",
-            fontsize=fs, color="#90A4AE", zorder=6)
+def frozen_box(x, y, w, h, z=4):
+    """Dark box with a thick ice-blue dashed border — clearly FROZEN."""
+    # Solid dark fill
+    p = FancyBboxPatch(
+        (x + 0.06, y + 0.06), w - 0.12, h - 0.12,
+        boxstyle="round,pad=0.06",
+        facecolor=C_CLIP, edgecolor="#80DEEA", linewidth=3.0,
+        linestyle="dashed", alpha=1.0, zorder=z,
+    )
+    ax.add_patch(p)
+    # FROZEN banner across top of box
+    ax.text(x + w / 2, y + h - 0.22,
+            "❄  FROZEN  ❄",
+            ha="center", va="center", fontsize=7.5, color="#80DEEA",
+            fontweight="bold", zorder=z + 1)
+
+def trainable_tag(cx, y, fs=7.5):
+    """Small green 'trainable' tag used on the fine-tuned ViT."""
+    ax.text(cx, y, "✓  fine-tuned  lr = 3e-6",
+            ha="center", va="center", fontsize=fs,
+            color="#A5D6A7", fontweight="bold", zorder=6)
 
 # ── Stream geometry ───────────────────────────────────────────────────────────
 # Each row: (y_centre, row_height)
@@ -142,10 +165,11 @@ txt(X_IN + W_IN / 2, yc(k) - 0.25, "224 × 224 × 3", fs=8, c="#BBDEFB")
 
 arr(X_IN + W_IN, yc(k), X_ENC, yc(k), c=C_VIS)
 
-box(X_ENC, yb(k), W_ENC, yh(k), C_CLIP)
-txt(X_ENC + W_ENC / 2, yc(k) + 0.28, "CLIP ViT-B/32", fs=9, bold=True)
-frozen_tag(X_ENC + W_ENC / 2, yc(k))
-txt(X_ENC + W_ENC / 2, yc(k) - 0.30, "197 patch tokens  →  d = 512", fs=7.5, c="#90A4AE")
+# Vision encoder: TRAINABLE (fine-tuned at lower lr)
+box(X_ENC, yb(k), W_ENC, yh(k), fc=C_VIS, ec="#A5D6A7", lw=2.5)
+txt(X_ENC + W_ENC / 2, yc(k) + 0.40, "CLIP ViT-B/32", fs=9, bold=True)
+trainable_tag(X_ENC + W_ENC / 2, yc(k) + 0.02)
+txt(X_ENC + W_ENC / 2, yc(k) - 0.35, "197 patch tokens  →  d = 512", fs=7.5, c="#C5CAE9")
 
 arr(X_ENC + W_ENC, yc(k), X_TOK, yc(k), c=C_VIS)
 
@@ -165,9 +189,8 @@ txt(X_IN + W_IN / 2, yc(k) - 0.18, '"push block left"', fs=8, c="#C8E6C9", itali
 
 arr(X_IN + W_IN, yc(k), X_ENC, yc(k), c=C_INS)
 
-box(X_ENC, yb(k), W_ENC, yh(k), C_CLIP)
-txt(X_ENC + W_ENC / 2, yc(k) + 0.18, "CLIP Text Encoder", fs=9, bold=True)
-frozen_tag(X_ENC + W_ENC / 2, yc(k) - 0.18)
+frozen_box(X_ENC, yb(k), W_ENC, yh(k))
+txt(X_ENC + W_ENC / 2, yc(k) - 0.08, "CLIP Text Encoder", fs=9, bold=True)
 
 arr(X_ENC + W_ENC, yc(k), X_TOK, yc(k), c=C_INS)
 
@@ -196,9 +219,8 @@ txt(X_ENC + v_w / 2, yc(k) - 0.16, "→ text", fs=7.5, c="#FFE0B2")
 
 arr(X_ENC + v_w, yc(k), X_ENC + v_w + 0.05, yc(k), c=C_ACT, lw=1.2)
 
-box(X_ENC + v_w, yb(k), c_w, yh(k), C_CLIP)
-txt(X_ENC + v_w + c_w / 2, yc(k) + 0.16, "CLIP Text", fs=8, bold=True)
-frozen_tag(X_ENC + v_w + c_w / 2, yc(k) - 0.16)
+frozen_box(X_ENC + v_w, yb(k), c_w, yh(k))
+txt(X_ENC + v_w + c_w / 2, yc(k) - 0.08, "CLIP Text", fs=8, bold=True)
 
 arr(X_ENC + W_ENC, yc(k), X_TOK, yc(k), c=C_ACT)
 
@@ -227,9 +249,8 @@ txt(X_ENC + vc_w / 2, yc(k) - 0.16, "→ outcome text", fs=7, c="#F8BBD0")
 
 arr(X_ENC + vc_w, yc(k), X_ENC + vc_w + 0.05, yc(k), c=C_EMB, lw=1.2)
 
-box(X_ENC + vc_w, yb(k), cc_w, yh(k), C_CLIP)
-txt(X_ENC + vc_w + cc_w / 2, yc(k) + 0.16, "CLIP Text", fs=8, bold=True)
-frozen_tag(X_ENC + vc_w + cc_w / 2, yc(k) - 0.16)
+frozen_box(X_ENC + vc_w, yb(k), cc_w, yh(k))
+txt(X_ENC + vc_w + cc_w / 2, yc(k) - 0.08, "CLIP Text", fs=8, bold=True)
 
 arr(X_ENC + W_ENC, yc(k), X_TOK, yc(k), c=C_EMB)
 
@@ -416,17 +437,18 @@ ax.text(
 # LEGEND
 # ══════════════════════════════════════════════════════════════════════════════
 leg_items = [
-    (C_VIS,  "Stream 1 — Vision"),
-    (C_INS,  "Stream 2 — Instruction"),
-    (C_ACT,  "Stream 3a — Action Narration"),
-    (C_EMB,  "Stream 3b — Embodied Consequence  [NEW]"),
-    (C_HIS,  "Stream 4 — History"),
-    (C_CLIP, "CLIP Encoder  (❄ frozen)"),
-    (C_SUB,  "2-Layer Causal Sub-Transformer"),
-    (C_FUSE, "6-Layer Bidirectional Fusion TF"),
-    (C_DIS,  "Discrete Head  (8-bin × K=4 chunks)"),
-    (C_REG,  "Regression Head  (continuous Δx, Δy)"),
-    ("#F57F17", "InfoNCE Alignment Loss  (λ=0.10)"),
+    (C_VIS,    "Stream 1 — Vision"),
+    (C_INS,    "Stream 2 — Instruction"),
+    (C_ACT,    "Stream 3a — Action Narration"),
+    (C_EMB,    "Stream 3b — Embodied Consequence  [NEW]"),
+    (C_HIS,    "Stream 4 — History"),
+    (C_VIS,    "CLIP ViT-B/32  ✓ trainable  (lr = 3e-6)"),   # dashed green border drawn separately
+    (C_CLIP,   "CLIP Text Encoder  ❄ FROZEN  (weights fixed)"),
+    (C_SUB,    "2-Layer Causal Sub-Transformer  (trainable)"),
+    (C_FUSE,   "6-Layer Bidirectional Fusion TF  (trainable)"),
+    (C_DIS,    "Discrete Head  (8-bin × K = 4 chunks)"),
+    (C_REG,    "Regression Head  (continuous Δx, Δy)"),
+    ("#F57F17", "InfoNCE Alignment Loss  (λ = 0.10, training only)"),
 ]
 
 LY_TOP = 14.60
@@ -440,7 +462,25 @@ txt(LX + 3.9, LY_TOP - 0.20, "Legend", fs=10, c=DARK, bold=True, z=7)
 
 for i, (col, lbl) in enumerate(leg_items):
     ly = LY_TOP - 0.65 - i * LY_STEP
-    box(LX, ly - 0.20, 0.55, 0.45, fc=col, ec="none", z=7)
+    if "FROZEN" in lbl:
+        # Dashed ice-blue border to match frozen_box style
+        p = FancyBboxPatch((LX + 0.06, ly - 0.14), 0.43, 0.33,
+                           boxstyle="round,pad=0.04",
+                           fc=C_CLIP, ec="#80DEEA", lw=2.2,
+                           linestyle="dashed", zorder=7)
+        ax.add_patch(p)
+        ax.text(LX + 0.275, ly + 0.02, "❄", ha="center", va="center",
+                fontsize=9, color="#80DEEA", zorder=8)
+    elif "trainable  (lr" in lbl:
+        # Green border to match fine-tuned ViT style
+        p = FancyBboxPatch((LX + 0.06, ly - 0.14), 0.43, 0.33,
+                           boxstyle="round,pad=0.04",
+                           fc=C_VIS, ec="#A5D6A7", lw=2.2, zorder=7)
+        ax.add_patch(p)
+        ax.text(LX + 0.275, ly + 0.02, "✓", ha="center", va="center",
+                fontsize=9, color="#A5D6A7", fontweight="bold", zorder=8)
+    else:
+        box(LX, ly - 0.20, 0.55, 0.45, fc=col, ec="none", z=7)
     ax.text(LX + 0.70, ly + 0.02, lbl, ha="left", va="center",
             fontsize=8, color=DARK, zorder=7)
 
