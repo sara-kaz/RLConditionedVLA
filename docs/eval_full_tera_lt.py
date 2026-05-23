@@ -16,17 +16,27 @@ Upload the organised checkpoints folder to Drive first:
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 MYDRIVE    = "/content/drive/MyDrive"
 CKPT_DIR   = f"{MYDRIVE}/VERA_LT_Checkpoints/lt_full_vera"
-CONFIG     = f"{MYDRIVE}/VLA-Robot-Learning/configs/config.yaml"
+REPO_URL   = "https://github.com/sara-kaz/RLConditionedVLA.git"
+REPO_PATH  = "/content/repo"          # where the repo is cloned
 SEEDS      = [42, 123, 456]
 N_EPISODES = 50      # per seed  →  150 total rollouts
 MAX_STEPS  = 60      # steps before declaring failure
 LT_SCALE   = 0.03   # tanh action_vec → LT continuous delta
 
 # ── INSTALL ───────────────────────────────────────────────────────────────────
-import subprocess, sys
+import subprocess, sys, os
 def _pip(pkg):
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg],
                           stderr=subprocess.STDOUT)
+
+# Clone repo if not already present
+if not os.path.isdir(REPO_PATH):
+    subprocess.check_call(["git", "clone", "--depth", "1", REPO_URL, REPO_PATH])
+    print(f"Cloned repo → {REPO_PATH}")
+else:
+    print(f"Repo already at {REPO_PATH}")
+
+CONFIG = f"{REPO_PATH}/configs/config.yaml"
 
 for pkg in ["pyyaml", "pillow", "numpy", "gym<=0.23.0", "pybullet"]:
     _pip(pkg)
@@ -53,7 +63,7 @@ import torch
 import torchvision.transforms as Tv
 from PIL import Image as PILImage
 
-sys.path.insert(0, str(Path(CONFIG).parent.parent))
+sys.path.insert(0, REPO_PATH)
 from models.vera_model import VERAModel
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -111,7 +121,17 @@ def load_model(ckpt_path, cfg_base):
         chunk_size=m.get("chunk_size", 1),
     ).to(device)
     state = ckpt.get("model_state", ckpt) if isinstance(ckpt, dict) else ckpt
-    model.load_state_dict(state, strict=False)
+    # Filter out any keys whose tensor shape doesn't match the current model
+    # (handles checkpoints trained with a different action-head width, e.g.
+    #  [256,256] CoT-lite vs [512,256] expand-compress head).
+    cur = model.state_dict()
+    compatible = {k: v for k, v in state.items()
+                  if k in cur and v.shape == cur[k].shape}
+    skipped = [k for k in state if k not in compatible]
+    if skipped:
+        print(f"  [load_model] skipped {len(skipped)} mismatched key(s): "
+              f"{skipped[:6]}{'...' if len(skipped)>6 else ''}")
+    model.load_state_dict(compatible, strict=False)
     model.eval()
     return model, cfg
 
