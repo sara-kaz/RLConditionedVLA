@@ -103,34 +103,65 @@ def get_frame(obs):
 def load_model(ckpt_path, cfg_base):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg  = copy.deepcopy(ckpt["cfg"]) if isinstance(ckpt, dict) and "cfg" in ckpt else copy.deepcopy(cfg_base)
-    m    = cfg["model"]; v = cfg.get("vera", {})
+    m    = cfg["model"]; vcfg = cfg.get("vera", {})
+
+    d_model     = m.get("d_model", 256)
+    num_actions = m["num_actions"]
+    chunk_size  = m.get("chunk_size", 1)
+
+    # ── Peek at checkpoint BEFORE building model ──────────────────────────────
+    state = ckpt.get("model_state", ckpt) if isinstance(ckpt, dict) else ckpt
+    ah1   = state.get("action_head.1.weight")
+    # Old head (no expand-compress): action_head.1 is Linear(D→D) → shape [D,D]
+    # New head (expand-compress):    action_head.1 is Linear(D→2D) → shape [2D,D]
+    old_head = (ah1 is not None and tuple(ah1.shape) == (d_model, d_model))
+
     model = VERAModel(
-        num_actions=m["num_actions"], history_len=m["history_len"],
+        num_actions=num_actions, history_len=m["history_len"],
         num_vis_frames=m.get("num_vis_frames", 3),
         fusion_layers=m.get("fusion_layers", 6), fusion_heads=m.get("fusion_heads", 8),
-        d_model=m.get("d_model", 256), d_ff_scale=m.get("d_ff_scale", 4),
+        d_model=d_model, d_ff_scale=m.get("d_ff_scale", 4),
         dropout=0.0, vision_token_dropout=0.0,
         freeze_clip=m.get("freeze_clip", True),
         unfreeze_clip_vision=m.get("unfreeze_clip_vision", True),
-        use_lang_feedback=v.get("use_lang_feedback", True),
-        use_temporal_history=v.get("use_temporal_history", True),
-        use_reward_gate=v.get("use_reward_gate", True),
-        use_consequence_token=v.get("use_consequence_token", True),
+        use_lang_feedback=vcfg.get("use_lang_feedback", True),
+        use_temporal_history=vcfg.get("use_temporal_history", True),
+        use_reward_gate=vcfg.get("use_reward_gate", True),
+        use_consequence_token=vcfg.get("use_consequence_token", True),
         action_dim=m.get("action_dim", 2),
-        action_vocab=v.get("action_vocab"),
-        chunk_size=m.get("chunk_size", 1),
+        action_vocab=vcfg.get("action_vocab"),
+        chunk_size=chunk_size,
     ).to(device)
-    state = ckpt.get("model_state", ckpt) if isinstance(ckpt, dict) else ckpt
-    # Filter out any keys whose tensor shape doesn't match the current model
-    # (handles checkpoints trained with a different action-head width, e.g.
-    #  [256,256] CoT-lite vs [512,256] expand-compress head).
+
+    if old_head:
+        # Rebuild action head to match checkpoint's simpler 3-layer MLP:
+        #   RMSNorm(D) → Linear(D→D) → SiLU → Dropout →
+        #   Linear(D→D) → SiLU → Dropout → Linear(D→A)
+        # indices:  0               1          2     3
+        #                           4          5     6     7
+        rmsnorm0 = model.action_head[0]          # reuse already-built RMSNorm[D]
+        model.action_head = nn.Sequential(
+            rmsnorm0,                                                         # 0
+            nn.Linear(d_model, d_model, bias=False),                         # 1
+            nn.SiLU(),                                                        # 2
+            nn.Dropout(0.0),                                                  # 3
+            nn.Linear(d_model, d_model, bias=False),                         # 4
+            nn.SiLU(),                                                        # 5
+            nn.Dropout(0.0),                                                  # 6
+            nn.Linear(d_model, num_actions * chunk_size, bias=False),        # 7
+        ).to(device)
+        print("  [load_model] old action head detected → rebuilt 3-layer MLP to match checkpoint")
+
+    # ── Load weights (all keys should now match) ──────────────────────────────
     cur = model.state_dict()
-    compatible = {k: v for k, v in state.items()
-                  if k in cur and v.shape == cur[k].shape}
+    compatible = {k: val for k, val in state.items()
+                  if k in cur and val.shape == cur[k].shape}
     skipped = [k for k in state if k not in compatible]
     if skipped:
-        print(f"  [load_model] skipped {len(skipped)} mismatched key(s): "
+        print(f"  [load_model] still-skipped {len(skipped)} key(s): "
               f"{skipped[:6]}{'...' if len(skipped)>6 else ''}")
+    else:
+        print("  [load_model] all checkpoint keys loaded successfully ✓")
     model.load_state_dict(compatible, strict=False)
     model.eval()
     return model, cfg
