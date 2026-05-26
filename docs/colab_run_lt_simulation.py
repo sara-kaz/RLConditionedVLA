@@ -62,13 +62,13 @@ OUT_PNG_SUB  = "/content/drive/MyDrive/corl_2026_template_submission/lt_qual_com
 FIG_SHOW_CAPTION = False   # caption lives in LaTeX — omit for a compact PNG
 FIG_DPI = 240
 # Figure typography (pt at save DPI — tuned for print / \\linewidth)
-FIG_FONT_HDR = 9.5
-FIG_FONT_INSTR = 8.5
-FIG_FONT_TOK = 7.5
-FIG_FONT_CAP = 7.5
-FIG_TOK_WRAP = 72          # wide strip → fewer awkward line breaks
-FIG_TOK_LINESPACING = 1.4
-FIG_INSTR_WRAP = 30
+FIG_FONT_HDR = 11.5
+FIG_FONT_INSTR = 10.5
+FIG_FONT_TOK = 9.5
+FIG_FONT_CAP = 8.5
+FIG_TOK_WRAP = 38          # each token gets ~half the row width → ~38 chars
+FIG_TOK_LINESPACING = 1.35
+FIG_INSTR_WRAP = 26
 FIG_FRAME_PX = 224         # resize all frames to this square for uniform panel size
 
 # Number of episodes to collect (top-N by dataset reward)
@@ -948,11 +948,12 @@ def _soft_wrap(text: str, width: int) -> str:
     )
 
 
-def _token_caption(nar: str, know: str) -> str:
-    return (
-        f"$E_{{\\mathrm{{act}}}}$: {_soft_wrap(nar, FIG_TOK_WRAP)}\n"
-        f"$E_{{\\mathrm{{emb}}}}$: {_soft_wrap(know, FIG_TOK_WRAP)}"
-    )
+def _token_left(nar: str) -> str:
+    return f"$E_{{\\mathrm{{act}}}}$: {_soft_wrap(nar, FIG_TOK_WRAP)}"
+
+
+def _token_right(know: str) -> str:
+    return f"$E_{{\\mathrm{{emb}}}}$: {_soft_wrap(know, FIG_TOK_WRAP)}"
 
 
 # Header row
@@ -1004,11 +1005,22 @@ for row_i, ep in enumerate(collected_episodes):
     know = ep.get("knowledge_mid", "—")
     ax_tok.set_ylim(0, 1)
     ax_tok.set_xlim(0, 1)
-    ax_tok.margins(x=0.04, y=0.12)
+    ax_tok.margins(x=0.02, y=0.10)
+    # E_act — left half
     ax_tok.text(
-        0.5, 0.5, _token_caption(nar, know),
+        0.01, 0.5, _token_left(nar),
         transform=ax_tok.transAxes,
-        fontsize=FIG_FONT_TOK, ha="center", va="center",
+        fontsize=FIG_FONT_TOK, ha="left", va="center",
+        color=TOKEN_CLR, linespacing=FIG_TOK_LINESPACING,
+        clip_on=False,
+    )
+    # thin vertical divider
+    ax_tok.axvline(0.50, color="#cccccc", linewidth=0.8, clip_on=False)
+    # E_emb — right half
+    ax_tok.text(
+        0.52, 0.5, _token_right(know),
+        transform=ax_tok.transAxes,
+        fontsize=FIG_FONT_TOK, ha="left", va="center",
         color=TOKEN_CLR, linespacing=FIG_TOK_LINESPACING,
         clip_on=False,
     )
