@@ -339,7 +339,9 @@ def rl_update(
 def rl_train(cfg: dict):
     from envs.sim_env import SimEnv
 
-    device  = cfg["training"].get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    device  = cfg["training"].get("device", "auto")
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     out_dir = Path(cfg["training"]["output_dir"])
     print(f"[rl_vera] device = {device}")
 
