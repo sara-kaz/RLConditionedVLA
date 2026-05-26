@@ -337,7 +337,7 @@ def rl_update(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def rl_train(cfg: dict):
-    from envs.sim_env import SimEnv
+    from envs.sim_env import make_env
 
     device  = cfg["training"].get("device", "auto")
     if device == "auto":
@@ -394,7 +394,7 @@ def rl_train(cfg: dict):
         weight_decay=cfg["rl"].get("weight_decay", 1e-4),
     )
 
-    env             = SimEnv(cfg)
+    env             = make_env(cfg)
     tokenizer_cache = {}
     rl_out_dir      = out_dir / "rl"
     rl_out_dir.mkdir(parents=True, exist_ok=True)

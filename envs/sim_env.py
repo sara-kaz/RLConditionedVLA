@@ -390,6 +390,181 @@ class BabyAIEnv(BaseEnv):
         self._env.close()
 
 
+# ── Language-Table wrapper ─────────────────────────────────────────────────────
+
+class LanguageTableEnv(BaseEnv):
+    """
+    Wraps Google Research Language-Table environments for RL fine-tuning.
+
+    Language-Table (Lynch et al., 2023) is a tabletop block-pushing benchmark
+    where the robot arm must push coloured blocks to goal positions specified
+    by natural language instructions ("push the red block to the blue block").
+
+    Action mapping: num_actions discrete directional bins → 2D end-effector
+    velocity [vx, vy], clipped to the LT action space ([-0.03, 0.03] m/s).
+
+    Observation: {'frame': (H, W, 3) uint8, 'instruction': str}
+    Reward:      1.0 on task success (binary), 0 otherwise.
+    Done:        True when task succeeds OR max_episode_steps reached.
+
+    Requires:
+        pip install --no-deps git+https://github.com/google-research/language-table.git
+        pip install pybullet
+        # Colab headless: apt-get install -y xvfb && Xvfb :99 -ac &
+    """
+
+    # 8-bin directional codebook matching config.yaml action_vocab
+    # Bin 0 = East (right), progressing counter-clockwise
+    _CODEBOOK = np.array([
+        [ 1.0,   0.0  ],   # 0: right         "I pushed the object to the right"
+        [ 0.707,  0.707],  # 1: up-right (NE)  "I pushed the object up and to the right"
+        [ 0.0,   1.0  ],   # 2: up             "I pushed the object upward"
+        [-0.707,  0.707],  # 3: up-left (NW)   "I pushed the object up and to the left"
+        [-1.0,   0.0  ],   # 4: left           "I pushed the object to the left"
+        [-0.707, -0.707],  # 5: down-left (SW) "I pushed the object down and to the left"
+        [ 0.0,  -1.0  ],   # 6: down           "I pushed the object downward"
+        [ 0.707, -0.707],  # 7: down-right (SE)"I pushed the object down and to the right"
+    ], dtype=np.float32)
+
+    def __init__(self, cfg: dict):
+        env_cfg           = cfg.get("env", {})
+        self._img_size    = cfg["data"].get("img_size", 224)
+        self._num_actions = cfg["model"]["num_actions"]
+        # LT native action space: [-0.03, 0.03] m/s. All 8 bins have unit magnitude
+        # so vel_scale=0.03 gives maximum decisive pushes in every direction.
+        self._vel_scale   = float(env_cfg.get("lt_velocity_scale", 0.03))
+        self._instruction = "push the block to the target location"
+
+        print("[LanguageTableEnv] Loading Language-Table environment …")
+        try:
+            from language_table.environments import language_table as lt_module
+
+            # Reward factory — import paths differ across package versions
+            reward_factory = None
+            for factory_path in [
+                ("language_table.environments.rewards.block2block", "BlockToBlockReward"),
+                ("language_table.environments.rewards.block2location", "BlockToLocationReward"),
+            ]:
+                try:
+                    import importlib
+                    mod = importlib.import_module(factory_path[0])
+                    reward_factory = getattr(mod, factory_path[1])
+                    break
+                except Exception:
+                    continue
+
+            seed = int(cfg["training"].get("seed", 42))
+
+            # Try various constructor signatures across LT versions
+            for kwargs in [
+                dict(block_mode=lt_module.BlockMode.ORIGINAL,
+                     reward_factory=reward_factory, seed=seed),
+                dict(block_mode=lt_module.BlockMode.ORIGINAL, seed=seed),
+                dict(seed=seed),
+                dict(),
+            ]:
+                if reward_factory is None and "reward_factory" in kwargs:
+                    continue
+                try:
+                    self._env = lt_module.LanguageTable(**kwargs)
+                    break
+                except (TypeError, AttributeError):
+                    continue
+            else:
+                raise RuntimeError("Could not instantiate LanguageTable with any known signature.")
+
+            print(f"[LanguageTableEnv] Ready — {self._num_actions} discrete bins, "
+                  f"vel_scale={self._vel_scale}")
+        except Exception as e:
+            raise RuntimeError(
+                f"[LanguageTableEnv] Failed: {e}\n"
+                "Install: pip install --no-deps "
+                "git+https://github.com/google-research/language-table.git\n"
+                "Headless display: apt-get install -y xvfb && Xvfb :99 -ac &\n"
+                "              and: import os; os.environ['DISPLAY'] = ':99'"
+            ) from e
+
+    def reset(self) -> Dict[str, Any]:
+        result = self._env.reset()
+        obs = result[0] if isinstance(result, (tuple, list)) else result
+        frame       = self._extract_frame(obs)
+        instruction = self._extract_instruction(obs)
+        return {"frame": frame, "instruction": instruction}
+
+    def step(self, action_idx: int) -> Tuple[Dict[str, Any], float, bool, Dict]:
+        idx = int(action_idx) % self._num_actions
+        codebook_idx = idx % len(self._CODEBOOK)
+        vel = (self._CODEBOOK[codebook_idx] * self._vel_scale).astype(np.float32)
+
+        result = self._env.step(vel)
+        if len(result) == 5:                     # new Gym: obs, rew, term, trunc, info
+            obs, reward, terminated, truncated, info = result
+            done = bool(terminated or truncated)
+        elif len(result) == 4:                   # old Gym: obs, rew, done, info
+            obs, reward, done, info = result
+            done = bool(done)
+        else:
+            obs, reward, done = result[0], result[1], bool(result[2])
+            info = {}
+
+        return (
+            {"frame": self._extract_frame(obs),
+             "instruction": self._extract_instruction(obs)},
+            float(reward),
+            done,
+            info if isinstance(info, dict) else {},
+        )
+
+    def _extract_frame(self, obs) -> np.ndarray:
+        frame = None
+        if isinstance(obs, dict):
+            for key in ("rgb", "image", "pixels", "obs"):
+                if key in obs:
+                    frame = np.asarray(obs[key])
+                    break
+        elif isinstance(obs, np.ndarray) and obs.ndim == 3:
+            frame = obs
+
+        if frame is None or frame.size == 0:
+            return np.zeros((self._img_size, self._img_size, 3), dtype=np.uint8)
+
+        if frame.dtype != np.uint8:
+            if frame.max() <= 1.0 + 1e-5:
+                frame = (frame * 255).clip(0, 255).astype(np.uint8)
+            else:
+                frame = frame.clip(0, 255).astype(np.uint8)
+
+        if frame.shape[:2] != (self._img_size, self._img_size):
+            from PIL import Image
+            frame = np.array(
+                Image.fromarray(frame).resize(
+                    (self._img_size, self._img_size), Image.BILINEAR)
+            )
+        return frame
+
+    def _extract_instruction(self, obs) -> str:
+        if isinstance(obs, dict):
+            for key in ("instruction_str", "instruction", "task", "mission"):
+                val = obs.get(key)
+                if val is None:
+                    continue
+                if isinstance(val, (bytes, np.bytes_)):
+                    val = bytes(val).decode("utf-8")
+                elif isinstance(val, np.ndarray):
+                    val = val.item() if val.ndim == 0 else bytes(val).decode("utf-8")
+                val = str(val).strip()
+                if val:
+                    self._instruction = val
+                    return val
+        return self._instruction
+
+    def close(self):
+        try:
+            self._env.close()
+        except Exception:
+            pass
+
+
 # ── factory ────────────────────────────────────────────────────────────────────
 
 def make_env(cfg: dict) -> BaseEnv:
@@ -397,17 +572,22 @@ def make_env(cfg: dict) -> BaseEnv:
     Build the correct environment from config.
 
     env_id routing:
-      "dummy"               → RandomDummyEnv   (no install required)
-      "babyai-*" / "BabyAI-*" → BabyAIEnv    (pip install minigrid)
-      "metaworld-*"         → MetaWorldEnv     (pip install metaworld)
-      anything else         → SimEnv (Gymnasium wrapper)
+      "dummy"                           → RandomDummyEnv   (no install required)
+      "language_table" / "lt" / "LT"   → LanguageTableEnv (pip install language-table)
+      "babyai-*" / "BabyAI-*"          → BabyAIEnv        (pip install minigrid)
+      "metaworld-*"                     → MetaWorldEnv     (pip install metaworld)
+      anything else                     → SimEnv (Gymnasium wrapper)
     """
     env_id = cfg.get("env", {}).get("env_id", "dummy")
+    env_id_lower = env_id.lower().replace("-", "_")
+
     if env_id == "dummy":
-        return SimEnv(cfg)
-    if env_id.lower().startswith(("babyai", "minigrid")):
+        return SimEnv(cfg)   # already defaults to RandomDummyEnv
+    if env_id_lower in ("language_table", "lt", "languagetable", "language_table_env"):
+        return LanguageTableEnv(cfg)
+    if env_id_lower.startswith(("babyai", "minigrid")):
         return BabyAIEnv(cfg)
-    if env_id.lower().startswith("metaworld"):
+    if env_id_lower.startswith("metaworld"):
         return MetaWorldEnv(cfg)
     return SimEnv(cfg)
 
