@@ -69,7 +69,7 @@ FIG_FONT_CAP = 7.5
 FIG_TOK_WRAP = 72          # wide strip → fewer awkward line breaks
 FIG_TOK_LINESPACING = 1.4
 FIG_INSTR_WRAP = 30
-FIG_FRAME_PX = 128         # resize all frames to this square for uniform panel size
+FIG_FRAME_PX = 224         # resize all frames to this square for uniform panel size
 
 # Number of episodes to collect (top-N by dataset reward)
 N_EPISODES = 3
@@ -880,9 +880,9 @@ if len(collected_episodes) == 0:
     ]
 
 N_ROWS = len(collected_episodes)
-FIG_W = 9.2
-HDR_H, IMG_H, TOK_H = 0.24, 1.12, 0.68
-total_h = HDR_H + N_ROWS * (IMG_H + TOK_H) + (0.35 if FIG_SHOW_CAPTION else 0.12)
+FIG_W = 11.0          # wider → each frame column is wider
+HDR_H, IMG_H, TOK_H = 0.22, 2.20, 0.52   # IMG_H up: bigger frames; TOK_H trimmed
+total_h = HDR_H + N_ROWS * (IMG_H + TOK_H) + (0.35 if FIG_SHOW_CAPTION else 0.08)
 
 import matplotlib as mpl
 import matplotlib.gridspec as gridspec
@@ -913,8 +913,8 @@ master = gridspec.GridSpec(
     n_master_rows, 4, figure=fig,
     width_ratios=[1.05, 1, 1, 1],
     height_ratios=height_ratios,
-    left=0.06, right=0.98, top=0.93, bottom=0.10 if not FIG_SHOW_CAPTION else 0.14,
-    wspace=0.06, hspace=0.20,
+    left=0.06, right=0.99, top=0.96, bottom=0.04 if not FIG_SHOW_CAPTION else 0.10,
+    wspace=0.03, hspace=0.04,   # tighter: less gap between columns and rows
 )
 
 
