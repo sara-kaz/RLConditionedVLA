@@ -542,34 +542,48 @@ class LanguageTableEnv(BaseEnv):
             ) from e
 
     def _get_block_dist(self, obs) -> Optional[float]:
-        """XY distance between the task's start-block and target-block.
+        """Shaping distance metric — returns None if unavailable (no crash).
 
-        Accesses self._env._reward_calculator (BlockToBlockReward) to find out
-        which two blocks are involved in the current episode, then reads their
-        '{block_name}_translation' keys from the LT observation dict.
+        Confirmed LT observation keys (from live Colab diagnostic, May 2026):
+          'effector_translation'        — arm tip XY position (shape 2)
+          'effector_target_translation' — oracle next arm position (shape 2)
+          'rgb'                         — camera image (180×320×3)
+          'instruction'                 — tokenised instruction (512 int32)
+        Block XY positions are NOT exposed in this LT package version.
 
-        Returns None (silently) if anything is inaccessible — the caller falls
-        back to zero shaping rather than crashing.
+        Strategy (priority order):
+          1. ||effector − effector_target|| — always present in LT obs;
+             gives a dense imitation signal (arm closer to oracle pos = better).
+          2. ||start_block − target_block|| — fallback if a future LT version
+             adds per-block translation keys to the observation.
         """
         if not isinstance(obs, dict):
             return None
+        # ── Priority 1: effector-to-oracle-target distance ────────────────────
+        try:
+            eff = obs.get("effector_translation")
+            tgt = obs.get("effector_target_translation")
+            if eff is not None and tgt is not None:
+                ep = np.asarray(eff, dtype=np.float32).ravel()[:2]
+                tp = np.asarray(tgt, dtype=np.float32).ravel()[:2]
+                return float(np.linalg.norm(ep - tp))
+        except Exception:
+            pass
+        # ── Priority 2: block-to-block distance (future LT versions) ──────────
         try:
             rc = getattr(self._env, "_reward_calculator", None)
-            if rc is None:
-                return None
-            sb = getattr(rc, "_start_block",  None)   # e.g. "red_star"
-            tb = getattr(rc, "_target_block", None)   # e.g. "blue_cube"
-            if sb is None or tb is None:
-                return None
-            sk = f"{sb}_translation"
-            tk = f"{tb}_translation"
-            if sk not in obs or tk not in obs:
-                return None
-            sp = np.asarray(obs[sk], dtype=np.float32).ravel()[:2]   # (x, y)
-            tp = np.asarray(obs[tk], dtype=np.float32).ravel()[:2]
-            return float(np.linalg.norm(sp - tp))
+            if rc is not None:
+                sb = getattr(rc, "_start_block",  None)
+                tb = getattr(rc, "_target_block", None)
+                if sb and tb:
+                    sk, tk = f"{sb}_translation", f"{tb}_translation"
+                    if sk in obs and tk in obs:
+                        sp = np.asarray(obs[sk], dtype=np.float32).ravel()[:2]
+                        tp = np.asarray(obs[tk], dtype=np.float32).ravel()[:2]
+                        return float(np.linalg.norm(sp - tp))
         except Exception:
-            return None
+            pass
+        return None
 
     def _unpack_timestep(self, timestep):
         """Extract (obs_dict, reward, done) from a dm_env TimeStep or gym tuple."""
