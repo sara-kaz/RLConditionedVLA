@@ -440,28 +440,27 @@ class LanguageTableEnv(BaseEnv):
         try:
             from language_table.environments import language_table as lt_module
 
-            # ── Probe for block_mode (attribute name varies across LT versions) ──
-            # Do NOT access these inside a list literal — evaluate lazily with getattr.
+            # ── Get block_mode from LanguageTableBlockVariants enum ──────────
+            # Confirmed API (from diagnostic): block_mode must be a member of
+            # language_table.environments.blocks.LanguageTableBlockVariants.
+            # FIXED_4 = 4-block setup (simplest for RL); fall back to first member.
+            from language_table.environments import blocks as _blocks_mod
+            bm_enum = getattr(_blocks_mod, "LanguageTableBlockVariants", None)
+            if bm_enum is None:
+                raise RuntimeError(
+                    "LanguageTableBlockVariants not found in "
+                    "language_table.environments.blocks — "
+                    f"available: {[a for a in dir(_blocks_mod) if not a.startswith('_')]}"
+                )
             block_mode = None
-            for bm_search in [
-                ("language_table",                          "LanguageTableBlockMode", "ORIGINAL"),
-                ("language_table.environments.language_table", "BlockMode",           "ORIGINAL"),
-                ("language_table.environments.blocks",      "BlockMode",              "ORIGINAL"),
-                ("language_table",                          "BlockMode",              "ORIGINAL"),
-            ]:
-                try:
-                    mod  = importlib.import_module(bm_search[0])
-                    cls  = getattr(mod, bm_search[1], None)
-                    if cls is None:
-                        continue
-                    val  = getattr(cls, bm_search[2], None)
-                    if val is None:                         # try first enum member
-                        val = next(iter(cls))
+            for preferred in ("FIXED_4", "TRAIN", "TRAIN_COMBINATIONS", "FIXED_8"):
+                val = getattr(bm_enum, preferred, None)
+                if val is not None:
                     block_mode = val
-                    print(f"  block_mode: {bm_search[0]}.{bm_search[1]}.{bm_search[2]}")
                     break
-                except Exception:
-                    continue
+            if block_mode is None:
+                block_mode = next(iter(bm_enum))   # first enum member as last resort
+            print(f"  block_mode: LanguageTableBlockVariants.{block_mode.name}")
 
             # ── Probe for reward_factory ──────────────────────────────────────
             reward_factory = None
