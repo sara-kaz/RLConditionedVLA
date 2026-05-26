@@ -345,6 +345,9 @@ def rl_train(cfg: dict):
     out_dir = Path(cfg["training"]["output_dir"])
     print(f"[rl_vera] device = {device}")
 
+    # YAML may deserialise scientific notation (e.g. 1e-4) as strings — cast all rl floats now
+    cfg["rl"] = {k: float(v) if isinstance(v, str) else v for k, v in cfg["rl"].items()}
+
     vera_cfg = cfg.get("vera", {})
 
     def make_model():
@@ -398,10 +401,10 @@ def rl_train(cfg: dict):
 
     log, best_return = [], -float("inf")
     cumulative_steps = 0          # total env steps taken — x-axis for sample efficiency curves
-    max_ep_steps     = cfg["rl"].get("max_episode_steps", 50)
-    num_rollouts     = cfg["rl"].get("num_rollouts", 4)
+    max_ep_steps     = int(cfg["rl"].get("max_episode_steps", 50))
+    num_rollouts     = int(cfg["rl"].get("num_rollouts", 4))
 
-    for epoch in range(1, cfg["rl"]["epochs"] + 1):
+    for epoch in range(1, int(cfg["rl"]["epochs"]) + 1):
         epoch_returns, epoch_successes, epoch_lengths = [], [], []
 
         for _ in range(num_rollouts):
