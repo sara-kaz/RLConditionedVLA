@@ -432,9 +432,15 @@ class LanguageTableEnv(BaseEnv):
         env_cfg           = cfg.get("env", {})
         self._img_size    = cfg["data"].get("img_size", 224)
         self._num_actions = cfg["model"]["num_actions"]
-        self._vel_scale   = float(env_cfg.get("lt_velocity_scale", 0.03))
-        self._instruction = "push the block to the target location"
-        self._dm_env      = False   # True when env uses dm_env TimeStep API
+        self._vel_scale      = float(env_cfg.get("lt_velocity_scale", 0.03))
+        # Dense reward shaping: add ±(delta_dist × scale) each step so
+        # REINFORCE gets a gradient even when binary success reward = 0.
+        # Scale kept small (default 0.1) so shaped_total << 1.0 and
+        # success_threshold = 1.0 still correctly identifies task completion.
+        self._shaping_scale  = float(env_cfg.get("lt_shaping_scale", 0.1))
+        self._prev_block_dist: Optional[float] = None
+        self._instruction    = "push the block to the target location"
+        self._dm_env         = False   # True when env uses dm_env TimeStep API
 
         print("[LanguageTableEnv] Loading Language-Table environment …")
         try:
@@ -535,6 +541,36 @@ class LanguageTableEnv(BaseEnv):
                 "Headless: apt-get install -y xvfb && Xvfb :99 -ac &"
             ) from e
 
+    def _get_block_dist(self, obs) -> Optional[float]:
+        """XY distance between the task's start-block and target-block.
+
+        Accesses self._env._reward_calculator (BlockToBlockReward) to find out
+        which two blocks are involved in the current episode, then reads their
+        '{block_name}_translation' keys from the LT observation dict.
+
+        Returns None (silently) if anything is inaccessible — the caller falls
+        back to zero shaping rather than crashing.
+        """
+        if not isinstance(obs, dict):
+            return None
+        try:
+            rc = getattr(self._env, "_reward_calculator", None)
+            if rc is None:
+                return None
+            sb = getattr(rc, "_start_block",  None)   # e.g. "red_star"
+            tb = getattr(rc, "_target_block", None)   # e.g. "blue_cube"
+            if sb is None or tb is None:
+                return None
+            sk = f"{sb}_translation"
+            tk = f"{tb}_translation"
+            if sk not in obs or tk not in obs:
+                return None
+            sp = np.asarray(obs[sk], dtype=np.float32).ravel()[:2]   # (x, y)
+            tp = np.asarray(obs[tk], dtype=np.float32).ravel()[:2]
+            return float(np.linalg.norm(sp - tp))
+        except Exception:
+            return None
+
     def _unpack_timestep(self, timestep):
         """Extract (obs_dict, reward, done) from a dm_env TimeStep or gym tuple."""
         # dm_env TimeStep: named tuple with .step_type / .reward / .observation
@@ -564,8 +600,14 @@ class LanguageTableEnv(BaseEnv):
 
     def reset(self) -> Dict[str, Any]:
         result = self._env.reset()
-        obs, _, _ = self._unpack_timestep(result) if hasattr(result, "observation") \
-            else (result[0] if isinstance(result, (tuple, list)) else result, 0.0, False)
+        if hasattr(result, "observation"):
+            obs, _, _ = self._unpack_timestep(result)
+        elif isinstance(result, (tuple, list)):
+            obs = result[0]
+        else:
+            obs = result
+        # Initialise shaped-reward baseline for this episode
+        self._prev_block_dist = self._get_block_dist(obs)
         return {"frame": self._extract_frame(obs),
                 "instruction": self._extract_instruction(obs)}
 
@@ -575,6 +617,18 @@ class LanguageTableEnv(BaseEnv):
 
         result = self._env.step(vel)
         obs, reward, done = self._unpack_timestep(result)
+
+        # ── Dense reward shaping ─────────────────────────────────────────────
+        # Add (prev_dist − cur_dist) × scale each step.
+        # Positive when robot moves blocks closer → gives REINFORCE a gradient
+        # even when the sparse terminal reward is 0.  Scale = 0.1 keeps the
+        # total shaped reward well below 1.0 so success_threshold = 1.0 still
+        # correctly identifies task-completion episodes.
+        if self._shaping_scale > 0:
+            dist_now = self._get_block_dist(obs)
+            if dist_now is not None and self._prev_block_dist is not None:
+                reward += (self._prev_block_dist - dist_now) * self._shaping_scale
+            self._prev_block_dist = dist_now
 
         return (
             {"frame": self._extract_frame(obs),

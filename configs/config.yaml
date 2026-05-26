@@ -131,6 +131,8 @@ env:
                                          # "dummy"          → RandomDummyEnv (pipeline test only)
                                          # "language_table" → LanguageTableEnv (real LT sim)
   lt_velocity_scale:    0.03             # m/s — LT action space is [-0.03, 0.03]
+  lt_shaping_scale:     0.1              # dense shaping: reward += (d_prev - d_now) × scale
+                                         # set 0.0 to use sparse binary reward only
   instruction:          "complete the task"
   domain_randomization: false
   obs_noise_std:        5.0
