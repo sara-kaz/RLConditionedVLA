@@ -452,8 +452,13 @@ class LanguageTableEnv(BaseEnv):
                     "language_table.environments.blocks — "
                     f"available: {[a for a in dir(_blocks_mod) if not a.startswith('_')]}"
                 )
+            # Confirmed member names from live Colab diagnostic (May 2026):
+            #   BLOCK_1, BLOCK_4, BLOCK_8, BLOCK_4_WPOLE, BLOCK_8_WPOLE, N_CHOOSE_K
+            # Try simplest first (1 block = easiest task for RL), then 4-block, then any.
             block_mode = None
-            for preferred in ("FIXED_4", "TRAIN", "TRAIN_COMBINATIONS", "FIXED_8"):
+            for preferred in ("BLOCK_1", "BLOCK_4", "BLOCK_8",
+                              "BLOCK_4_WPOLE", "BLOCK_8_WPOLE",
+                              "FIXED_4", "TRAIN", "TRAIN_COMBINATIONS", "FIXED_8"):
                 val = getattr(bm_enum, preferred, None)
                 if val is not None:
                     block_mode = val
