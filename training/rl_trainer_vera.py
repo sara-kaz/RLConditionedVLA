@@ -399,7 +399,7 @@ def rl_train(cfg: dict):
     rl_out_dir      = out_dir / "rl"
     rl_out_dir.mkdir(parents=True, exist_ok=True)
 
-    log, best_return = [], -float("inf")
+    log, best_return, best_sr = [], -float("inf"), -float("inf")
     cumulative_steps = 0          # total env steps taken — x-axis for sample efficiency curves
     max_ep_steps     = int(cfg["rl"].get("max_episode_steps", 50))
     num_rollouts     = int(cfg["rl"].get("num_rollouts", 4))
@@ -452,7 +452,19 @@ def rl_train(cfg: dict):
                 "cumulative_steps": cumulative_steps,
                 "model_state":      model.state_dict(),
             }, rl_out_dir / "best_rl_vera.pt")
-            print(f"  ✓ best RL checkpoint saved (return={best_return:.4f} "
+            print(f"  ✓ best-return checkpoint saved (return={best_return:.4f} "
+                  f"@ {cumulative_steps} steps)")
+
+        # Save separately by task success rate — this is the metric that matters
+        if mean_success > best_sr:
+            best_sr = mean_success
+            torch.save({
+                "epoch":            epoch,
+                "cumulative_steps": cumulative_steps,
+                "success_rate":     best_sr,
+                "model_state":      model.state_dict(),
+            }, rl_out_dir / "best_sr_vera.pt")
+            print(f"  ★ best-SR checkpoint saved   (SR={best_sr*100:.1f}% "
                   f"@ {cumulative_steps} steps)")
 
         if epoch % cfg["rl"].get("save_every", 20) == 0:
