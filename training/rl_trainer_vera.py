@@ -404,6 +404,10 @@ def rl_train(cfg: dict):
     max_ep_steps     = int(cfg["rl"].get("max_episode_steps", 50))
     num_rollouts     = int(cfg["rl"].get("num_rollouts", 4))
 
+    # Early stopping: halt if SR does not improve for `sr_patience` epochs
+    sr_patience      = int(cfg["rl"].get("sr_patience", 0))   # 0 = disabled
+    epochs_no_sr_imp = 0   # counter
+
     for epoch in range(1, int(cfg["rl"]["epochs"]) + 1):
         epoch_returns, epoch_successes, epoch_lengths = [], [], []
 
@@ -458,6 +462,7 @@ def rl_train(cfg: dict):
         # Save separately by task success rate — this is the metric that matters
         if mean_success > best_sr:
             best_sr = mean_success
+            epochs_no_sr_imp = 0
             torch.save({
                 "epoch":            epoch,
                 "cumulative_steps": cumulative_steps,
@@ -466,6 +471,14 @@ def rl_train(cfg: dict):
             }, rl_out_dir / "best_sr_vera.pt")
             print(f"  ★ best-SR checkpoint saved   (SR={best_sr*100:.1f}% "
                   f"@ {cumulative_steps} steps)")
+        else:
+            epochs_no_sr_imp += 1
+
+        # Early-stopping check
+        if sr_patience > 0 and epochs_no_sr_imp >= sr_patience:
+            print(f"\n[rl_vera] Early stopping: no SR improvement for "
+                  f"{sr_patience} epochs (best SR={best_sr*100:.1f}%). Halting.")
+            break
 
         if epoch % cfg["rl"].get("save_every", 20) == 0:
             torch.save({
