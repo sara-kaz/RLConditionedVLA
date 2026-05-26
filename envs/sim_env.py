@@ -454,10 +454,14 @@ class LanguageTableEnv(BaseEnv):
                 )
             # Confirmed member names from live Colab diagnostic (May 2026):
             #   BLOCK_1, BLOCK_4, BLOCK_8, BLOCK_4_WPOLE, BLOCK_8_WPOLE, N_CHOOSE_K
-            # Try simplest first (1 block = easiest task for RL), then 4-block, then any.
+            #
+            # IMPORTANT: BLOCK_1 = only 1 block on table.  BlockToBlockReward needs
+            # to sample 2 blocks (start + target) without replacement, so BLOCK_1
+            # causes ValueError at reset().  Use BLOCK_4 (4 blocks) as the minimum.
             block_mode = None
-            for preferred in ("BLOCK_1", "BLOCK_4", "BLOCK_8",
+            for preferred in ("BLOCK_4", "BLOCK_8",
                               "BLOCK_4_WPOLE", "BLOCK_8_WPOLE",
+                              "BLOCK_1", "N_CHOOSE_K",
                               "FIXED_4", "TRAIN", "TRAIN_COMBINATIONS", "FIXED_8"):
                 val = getattr(bm_enum, preferred, None)
                 if val is not None:
