@@ -427,92 +427,151 @@ class LanguageTableEnv(BaseEnv):
     ], dtype=np.float32)
 
     def __init__(self, cfg: dict):
+        import importlib
+
         env_cfg           = cfg.get("env", {})
         self._img_size    = cfg["data"].get("img_size", 224)
         self._num_actions = cfg["model"]["num_actions"]
-        # LT native action space: [-0.03, 0.03] m/s. All 8 bins have unit magnitude
-        # so vel_scale=0.03 gives maximum decisive pushes in every direction.
         self._vel_scale   = float(env_cfg.get("lt_velocity_scale", 0.03))
         self._instruction = "push the block to the target location"
+        self._dm_env      = False   # True when env uses dm_env TimeStep API
 
         print("[LanguageTableEnv] Loading Language-Table environment …")
         try:
             from language_table.environments import language_table as lt_module
 
-            # Reward factory — import paths differ across package versions
-            reward_factory = None
-            for factory_path in [
-                ("language_table.environments.rewards.block2block", "BlockToBlockReward"),
-                ("language_table.environments.rewards.block2location", "BlockToLocationReward"),
+            # ── Probe for block_mode (attribute name varies across LT versions) ──
+            # Do NOT access these inside a list literal — evaluate lazily with getattr.
+            block_mode = None
+            for bm_search in [
+                ("language_table",                          "LanguageTableBlockMode", "ORIGINAL"),
+                ("language_table.environments.language_table", "BlockMode",           "ORIGINAL"),
+                ("language_table.environments.blocks",      "BlockMode",              "ORIGINAL"),
+                ("language_table",                          "BlockMode",              "ORIGINAL"),
             ]:
                 try:
-                    import importlib
-                    mod = importlib.import_module(factory_path[0])
-                    reward_factory = getattr(mod, factory_path[1])
+                    mod  = importlib.import_module(bm_search[0])
+                    cls  = getattr(mod, bm_search[1], None)
+                    if cls is None:
+                        continue
+                    val  = getattr(cls, bm_search[2], None)
+                    if val is None:                         # try first enum member
+                        val = next(iter(cls))
+                    block_mode = val
+                    print(f"  block_mode: {bm_search[0]}.{bm_search[1]}.{bm_search[2]}")
+                    break
+                except Exception:
+                    continue
+
+            # ── Probe for reward_factory ──────────────────────────────────────
+            reward_factory = None
+            for rf_search in [
+                ("language_table.environments.rewards.block2block",    "BlockToBlockReward"),
+                ("language_table.environments.rewards.block2location",  "BlockToLocationReward"),
+                ("language_table.environments.rewards",                 "BlockToBlockReward"),
+            ]:
+                try:
+                    mod = importlib.import_module(rf_search[0])
+                    reward_factory = getattr(mod, rf_search[1])
+                    print(f"  reward_factory: {rf_search[1]}")
                     break
                 except Exception:
                     continue
 
             seed = int(cfg["training"].get("seed", 42))
 
-            # Try various constructor signatures across LT versions
-            for kwargs in [
-                dict(block_mode=lt_module.BlockMode.ORIGINAL,
-                     reward_factory=reward_factory, seed=seed),
-                dict(block_mode=lt_module.BlockMode.ORIGINAL, seed=seed),
-                dict(seed=seed),
-                dict(),
-            ]:
-                if reward_factory is None and "reward_factory" in kwargs:
-                    continue
+            # ── Try constructor signatures from most to least specific ────────
+            # Build candidate kwargs dicts using local variables (not module attrs)
+            # to avoid eager AttributeError.
+            candidates = []
+            if block_mode is not None and reward_factory is not None:
+                candidates.append({"block_mode": block_mode,
+                                    "reward_factory": reward_factory, "seed": seed})
+            if block_mode is not None:
+                candidates.append({"block_mode": block_mode, "seed": seed})
+            candidates += [{"seed": seed}, {}]
+
+            last_err = None
+            for kw in candidates:
                 try:
-                    self._env = lt_module.LanguageTable(**kwargs)
+                    self._env = lt_module.LanguageTable(**kw)
+                    print(f"  constructor kwargs: {list(kw.keys())}")
                     break
-                except (TypeError, AttributeError):
+                except Exception as e:
+                    last_err = e
                     continue
             else:
-                raise RuntimeError("Could not instantiate LanguageTable with any known signature.")
+                raise RuntimeError(
+                    f"All constructor signatures failed. Last error: {last_err}"
+                )
 
-            print(f"[LanguageTableEnv] Ready — {self._num_actions} discrete bins, "
-                  f"vel_scale={self._vel_scale}")
+            # ── Detect dm_env vs gym API ──────────────────────────────────────
+            # language-table is built on dm_env; reset() returns a TimeStep object
+            # (not a tuple), and TimeStep.step_type indicates episode boundaries.
+            try:
+                import dm_env as _dm
+                self._dm_env = isinstance(self._env, _dm.Environment)
+            except ImportError:
+                # Detect by duck-typing: dm_env TimeStep has .observation attribute
+                self._dm_env = hasattr(self._env, "observation_spec")
+
+            print(f"[LanguageTableEnv] Ready — API={'dm_env' if self._dm_env else 'gym'}, "
+                  f"{self._num_actions} bins × {self._vel_scale} m/s")
+
         except Exception as e:
             raise RuntimeError(
                 f"[LanguageTableEnv] Failed: {e}\n"
                 "Install: pip install --no-deps "
                 "git+https://github.com/google-research/language-table.git\n"
-                "Headless display: apt-get install -y xvfb && Xvfb :99 -ac &\n"
-                "              and: import os; os.environ['DISPLAY'] = ':99'"
+                "         pip install dm-env\n"
+                "Headless: apt-get install -y xvfb && Xvfb :99 -ac &"
             ) from e
+
+    def _unpack_timestep(self, timestep):
+        """Extract (obs_dict, reward, done) from a dm_env TimeStep or gym tuple."""
+        # dm_env TimeStep: named tuple with .step_type / .reward / .observation
+        if hasattr(timestep, "observation"):
+            obs    = timestep.observation
+            reward = float(timestep.reward or 0.0)
+            # LAST step_type means episode ended
+            try:
+                import dm_env as _dm
+                done = (timestep.step_type == _dm.StepType.LAST)
+            except Exception:
+                done = getattr(timestep, "last", lambda: False)()
+            return obs, reward, bool(done)
+
+        # Gym tuple: (obs, reward, done[, truncated][, info])
+        if isinstance(timestep, (tuple, list)):
+            if len(timestep) >= 5:
+                obs, reward, terminated, truncated = timestep[:4]
+                return obs, float(reward), bool(terminated or truncated)
+            if len(timestep) == 4:
+                obs, reward, done, _ = timestep
+                return obs, float(reward), bool(done)
+            obs, reward, done = timestep[:3]
+            return obs, float(reward), bool(done)
+
+        raise ValueError(f"Unexpected step/reset return type: {type(timestep)}")
 
     def reset(self) -> Dict[str, Any]:
         result = self._env.reset()
-        obs = result[0] if isinstance(result, (tuple, list)) else result
-        frame       = self._extract_frame(obs)
-        instruction = self._extract_instruction(obs)
-        return {"frame": frame, "instruction": instruction}
+        obs, _, _ = self._unpack_timestep(result) if hasattr(result, "observation") \
+            else (result[0] if isinstance(result, (tuple, list)) else result, 0.0, False)
+        return {"frame": self._extract_frame(obs),
+                "instruction": self._extract_instruction(obs)}
 
     def step(self, action_idx: int) -> Tuple[Dict[str, Any], float, bool, Dict]:
         idx = int(action_idx) % self._num_actions
-        codebook_idx = idx % len(self._CODEBOOK)
-        vel = (self._CODEBOOK[codebook_idx] * self._vel_scale).astype(np.float32)
+        vel = (self._CODEBOOK[idx % len(self._CODEBOOK)] * self._vel_scale).astype(np.float32)
 
         result = self._env.step(vel)
-        if len(result) == 5:                     # new Gym: obs, rew, term, trunc, info
-            obs, reward, terminated, truncated, info = result
-            done = bool(terminated or truncated)
-        elif len(result) == 4:                   # old Gym: obs, rew, done, info
-            obs, reward, done, info = result
-            done = bool(done)
-        else:
-            obs, reward, done = result[0], result[1], bool(result[2])
-            info = {}
+        obs, reward, done = self._unpack_timestep(result)
 
         return (
             {"frame": self._extract_frame(obs),
              "instruction": self._extract_instruction(obs)},
-            float(reward),
-            done,
-            info if isinstance(info, dict) else {},
+            reward, done, {},
         )
 
     def _extract_frame(self, obs) -> np.ndarray:
