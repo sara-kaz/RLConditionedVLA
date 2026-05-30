@@ -936,17 +936,6 @@ class VERAModel(nn.Module):
         for p in self.vis_adapter.parameters():
             p.requires_grad = False
 
-    def enable_visual_adapter(self):
-        """Activate the visual domain adapter and make its params trainable.
-
-        Call this in the RL trainer AFTER loading the SFT checkpoint.
-        The adapter starts as an identity map (zero-init output projection)
-        and learns a sim-to-real domain correction during RL fine-tuning.
-        """
-        self.use_visual_adapter = True
-        for p in self.vis_adapter.parameters():
-            p.requires_grad = True
-
         # ── Stream 3: Action Language Feedback Encoder [NOVEL] ───────────────
         if use_lang_feedback:
             self.action_lang_encoder = ActionLanguageFeedbackEncoder(
@@ -1035,6 +1024,17 @@ class VERAModel(nn.Module):
         )
 
         self._init_weights()
+
+    def enable_visual_adapter(self):
+        """Activate the visual domain adapter and make its params trainable.
+
+        Call this in the RL trainer AFTER loading the SFT checkpoint.
+        The adapter starts as an identity map (zero-init output projection)
+        and learns a sim-to-real domain correction during RL fine-tuning.
+        """
+        self.use_visual_adapter = True
+        for p in self.vis_adapter.parameters():
+            p.requires_grad = True
 
     def _init_weights(self):
         for m in self.modules():
