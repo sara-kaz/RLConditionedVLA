@@ -140,7 +140,9 @@ def collect_rollout(
     action_dim   = cfg["model"].get("action_dim", 4)
     null_vec     = np.zeros(action_dim, dtype=np.float32)  # padding vector at t=0
 
+    print(f"[rollout] env.reset() ...", end=" ", flush=True)
     obs          = env.reset()
+    print("ok", flush=True)
     frame_q      = deque(maxlen=num_vis_frames)
     action_q     = deque([num_actions] * history_len, maxlen=history_len)
     reward_q     = deque([0.0]         * history_len, maxlen=history_len)
@@ -441,9 +443,12 @@ def rl_train(cfg: dict):
     epochs_no_sr_imp = 0   # counter
 
     for epoch in range(1, int(cfg["rl"]["epochs"]) + 1):
+        print(f"\n── Epoch {epoch}/{int(cfg['rl']['epochs'])} "
+              f"({num_rollouts} rollouts × {max_ep_steps} steps) ──", flush=True)
         epoch_returns, epoch_successes, epoch_lengths = [], [], []
 
-        for _ in range(num_rollouts):
+        for ri in range(num_rollouts):
+            print(f"  rollout {ri+1}/{num_rollouts} ...", end=" ", flush=True)
             buf     = collect_rollout(model, env, cfg, device, tokenizer_cache)
             metrics = rl_update(model, value_head, buf, optimizer, cfg, device, bc_model)
 
@@ -458,6 +463,8 @@ def rl_train(cfg: dict):
             epoch_returns.append(ep_return)
             epoch_successes.append(int(ep_return >= success_thr))
             epoch_lengths.append(ep_steps)
+            print(f"steps={ep_steps} return={ep_return:.3f} "
+                  f"{'✓' if ep_return >= success_thr else '✗'}", flush=True)
 
             buf.clear()
 
@@ -479,7 +486,7 @@ def rl_train(cfg: dict):
               f"return {mean_ret:.4f} | success {mean_success*100:.1f}% | "
               f"policy {metrics['policy_loss']:.4f} | "
               f"entropy {metrics['entropy']:.4f} | "
-              f"kl {metrics['kl_loss']:.4f}")
+              f"kl {metrics['kl_loss']:.4f}", flush=True)
 
         if mean_ret > best_return:
             best_return = mean_ret
