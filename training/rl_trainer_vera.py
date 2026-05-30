@@ -179,7 +179,10 @@ def collect_rollout(
             out = model(frames_in, lang_in, act_hist_in, rew_hist_in,
                         prev_a_in, prev_r_in,
                         action_vec_hist=act_vec_in)
-        action = torch.multinomial(F.softmax(out["logits"], dim=-1), 1).item()
+        # With chunk_size > 1 the model outputs num_actions*chunk_size logits;
+        # for single-step rollout we only use the first chunk (first num_actions bins).
+        _logits = out["logits"][:, :num_actions]
+        action = torch.multinomial(F.softmax(_logits, dim=-1), 1).item()
 
         obs, reward, done, info = env.step(action)
 
@@ -275,7 +278,8 @@ def rl_update(
     # Forward pass (with grad)
     out = model(frames, lang_tokens, act_hist, rew_hist, prev_actions, prev_rewards,
                 state_delta=state_deltas, action_vec_hist=act_vec_hist)
-    logits     = out["logits"]                                  # (N, A)
+    _num_act   = cfg["model"]["num_actions"]
+    logits     = out["logits"][:, :_num_act]                   # (N, A) — first chunk only
     cls_feat   = out["cls_features"]                           # (N, D)
 
     # Value estimate (no gradient back through policy for value loss)
@@ -303,7 +307,7 @@ def rl_update(
                                  prev_actions, prev_rewards,
                                  state_delta=state_deltas,
                                  action_vec_hist=act_vec_hist)
-            bc_probs  = F.softmax(bc_out["logits"], dim=-1)
+            bc_probs  = F.softmax(bc_out["logits"][:, :_num_act], dim=-1)
         kl_loss = F.kl_div(log_probs, bc_probs, reduction="batchmean")
 
     vf_coef      = cfg["rl"].get("vf_coef", 0.5)
@@ -350,6 +354,34 @@ def rl_train(cfg: dict):
 
     vera_cfg = cfg.get("vera", {})
 
+    # ── Detect chunk_size from checkpoint before building the model ───────────
+    # The config yaml may say chunk_size=1 while the actual checkpoint was trained
+    # with chunk_size=4 (or vice versa).  We read the LAST action_head weight
+    # layer from the checkpoint and infer: chunk_size = out_dim / num_actions.
+    _num_actions = cfg["model"]["num_actions"]
+    _cfg_chunk   = cfg["model"].get("chunk_size", 1)
+    bc_ckpt_path = out_dir / "best_sft_vera.pt"
+
+    def _detect_chunk_size(ckpt_path: Path) -> int:
+        if not ckpt_path.exists():
+            return _cfg_chunk
+        raw = torch.load(ckpt_path, map_location="cpu")
+        sd  = raw.get("model_state", raw.get("model", raw))
+        ah_layers = [(k, v) for k, v in sd.items()
+                     if "action_head" in k and k.endswith(".weight") and "norm" not in k]
+        if not ah_layers:
+            return _cfg_chunk
+        _last_k, _last_v = ah_layers[-1]
+        if _last_v.shape[0] % _num_actions == 0:
+            detected = _last_v.shape[0] // _num_actions
+            if detected != _cfg_chunk:
+                print(f"[rl_vera] chunk_size: config={_cfg_chunk} → detected={detected} "
+                      f"from '{_last_k}' shape={list(_last_v.shape)}")
+            return detected
+        return _cfg_chunk
+
+    chunk_size = _detect_chunk_size(bc_ckpt_path)
+
     def make_model():
         return VERAModel(
             num_actions=cfg["model"]["num_actions"],
@@ -368,17 +400,17 @@ def rl_train(cfg: dict):
             use_consequence_token=vera_cfg.get("use_consequence_token", True),
             action_dim=cfg["model"].get("action_dim", 4),   # 4=MetaWorld, 2=Language-Table, 7=CALVIN
             action_vocab=vera_cfg.get("action_vocab"),      # None → use built-in vocabulary
+            chunk_size=chunk_size,                          # detected from checkpoint
         )
 
     model = make_model().to(device)
 
     # Load BC checkpoint
-    bc_ckpt_path = out_dir / "best_sft_vera.pt"
-    bc_model     = None
+    bc_model = None
     if bc_ckpt_path.exists():
         ckpt = torch.load(bc_ckpt_path, map_location=device)
         model.load_state_dict(ckpt["model_state"])
-        print(f"[rl_vera] Loaded BC checkpoint from {bc_ckpt_path}")
+        print(f"[rl_vera] Loaded BC checkpoint from {bc_ckpt_path}  (chunk_size={chunk_size})")
         bc_model = make_model().to(device)
         bc_model.load_state_dict(ckpt["model_state"])
         for p in bc_model.parameters():
