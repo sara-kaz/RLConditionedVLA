@@ -316,10 +316,19 @@ def rl_update(
     entropy_coef = cfg["rl"].get("entropy_coef", 0.01)
     kl_coef      = cfg["rl"].get("kl_coef", 0.1)
 
+    # Entropy floor: penalise collapse only when entropy drops below floor.
+    # H_max = log(num_actions) = log(8) ≈ 2.08.  Floor = 0.7 * H_max ≈ 1.45.
+    # Without this, entropy_coef=0 allows the policy to collapse to a single
+    # action with no force to explore — causing return=-0.000 for all rollouts.
+    entropy_floor = cfg["rl"].get("entropy_floor", 0.7)     # fraction of H_max
+    H_max         = torch.log(torch.tensor(float(_num_act)))
+    entropy_penalty = F.relu(entropy_floor * H_max - entropy)  # >0 only when below floor
+
     total_loss = (policy_loss
                   + vf_coef      * value_loss
                   - entropy_coef * entropy
-                  + kl_coef      * kl_loss)
+                  + kl_coef      * kl_loss
+                  + entropy_penalty)
 
     optimizer.zero_grad()
     total_loss.backward()
@@ -382,7 +391,23 @@ def rl_train(cfg: dict):
             return detected
         return _cfg_chunk
 
-    chunk_size = _detect_chunk_size(bc_ckpt_path)
+    sft_chunk_size = _detect_chunk_size(bc_ckpt_path)
+
+    # ── TERA-RL architectural fix ─────────────────────────────────────────────
+    # Three problems with using the SFT model directly for RL:
+    #   1. chunk_size=4: action head predicts 32 logits jointly; RL slices first 8.
+    #      The CLS token gradient is therefore wrong — optimising a 8-dim objective
+    #      through a head designed as part of a 32-dim joint prediction.
+    #   2. Consequence token always encodes "I made little progress" (reward≈0 in RL),
+    #      adding a constant bias that hurts action diversity and exploration.
+    #   3. Consequence token was trained on oracle verbalised outcomes from demos;
+    #      the RL outcome verbalisations are out-of-distribution for that encoder.
+    #
+    # Fix: build RL model with chunk_size=1 + consequence token DISABLED.
+    # Transfer backbone weights exactly; re-initialise ONLY the action head output
+    # layer from the first-chunk slice of the SFT head (action_head.8.weight[:8, :]).
+    # Freeze backbone; train only the 3-layer action head (~50K params → ~2K params).
+    rl_chunk_size = 1   # single-step RL always uses chunk_size=1
 
     def make_model():
         return VERAModel(
@@ -399,26 +424,64 @@ def rl_train(cfg: dict):
             use_lang_feedback=vera_cfg.get("use_lang_feedback", True),
             use_temporal_history=vera_cfg.get("use_temporal_history", True),
             use_reward_gate=vera_cfg.get("use_reward_gate", True),
-            use_consequence_token=vera_cfg.get("use_consequence_token", True),
-            action_dim=cfg["model"].get("action_dim", 4),   # 4=MetaWorld, 2=Language-Table, 7=CALVIN
-            action_vocab=vera_cfg.get("action_vocab"),      # None → use built-in vocabulary
-            chunk_size=chunk_size,                          # detected from checkpoint
+            use_consequence_token=False,   # TERA-RL: disable — out-of-dist in RL rollouts
+            action_dim=cfg["model"].get("action_dim", 4),
+            action_vocab=vera_cfg.get("action_vocab"),
+            chunk_size=rl_chunk_size,      # TERA-RL: always 1 for single-step RL
         )
 
     model = make_model().to(device)
 
-    # Load BC checkpoint
+    # Load BC checkpoint — transfer backbone exactly, re-init action head output layer
     bc_model = None
     if bc_ckpt_path.exists():
-        ckpt = torch.load(bc_ckpt_path, map_location=device)
-        model.load_state_dict(ckpt["model_state"])
-        print(f"[rl_vera] Loaded BC checkpoint from {bc_ckpt_path}  (chunk_size={chunk_size})")
+        ckpt    = torch.load(bc_ckpt_path, map_location=device)
+        sft_sd  = ckpt.get("model_state", ckpt.get("model", ckpt))
+        rl_sd   = model.state_dict()
+
+        # Copy every key that exists in both and has matching shape (backbone).
+        # The action head output layer (action_head.8.weight) will mismatch when
+        # sft_chunk_size != rl_chunk_size — handle that separately below.
+        transferred, skipped = 0, 0
+        for k, v in sft_sd.items():
+            if k not in rl_sd:
+                skipped += 1; continue
+            if v.shape != rl_sd[k].shape:
+                skipped += 1; continue
+            rl_sd[k] = v; transferred += 1
+
+        # Re-initialise action head output layer from first-chunk slice of SFT weights.
+        # SFT: action_head.8.weight shape = [num_actions*sft_chunk, d_model]
+        # RL:  action_head.8.weight shape = [num_actions,            d_model]
+        _ah_out_key = "action_head.8.weight"
+        if _ah_out_key in sft_sd and sft_chunk_size > rl_chunk_size:
+            sft_w = sft_sd[_ah_out_key]   # [32, 256] for chunk_size=4
+            rl_sd[_ah_out_key] = sft_w[:_num_actions].clone()  # take first 8 rows
+            print(f"[rl_vera] Action head: transferred first {_num_actions} rows "
+                  f"from SFT head (shape {list(sft_w.shape)} → {list(rl_sd[_ah_out_key].shape)})")
+
+        model.load_state_dict(rl_sd)
+        print(f"[rl_vera] TERA-RL transfer: {transferred} layers copied, {skipped} reshaped/added")
+        print(f"[rl_vera] chunk_size: SFT={sft_chunk_size} → RL={rl_chunk_size}  "
+              f"consequence_token=OFF")
+        # BC anchor: same TERA-RL architecture (chunk_size=1, no consequence token)
         bc_model = make_model().to(device)
-        bc_model.load_state_dict(ckpt["model_state"])
+        bc_model.load_state_dict(model.state_dict())   # copy already-transferred weights
         for p in bc_model.parameters():
             p.requires_grad = False
     else:
         print("[rl_vera] Warning: no BC checkpoint — training RL from scratch.")
+
+    # ── Freeze backbone; train only action head (TERA-RL) ─────────────────────
+    # Backbone: CLIP + projections + lang_feedback_encoder + fusion_transformer + cls_token
+    # Trainable: action_head only (~2K params vs ~100K total)
+    _action_head_params = set(id(p) for p in model.action_head.parameters())
+    for name, p in model.named_parameters():
+        p.requires_grad = id(p) in _action_head_params
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_total     = sum(p.numel() for p in model.parameters())
+    print(f"[rl_vera] Trainable: {n_trainable:,} / {n_total:,} params "
+          f"(action_head only, backbone frozen)")
 
     value_head = ValueHead(d_model=cfg["model"].get("d_model", 256)).to(device)
 
