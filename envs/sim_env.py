@@ -541,54 +541,87 @@ class LanguageTableEnv(BaseEnv):
                 "Headless: apt-get install -y xvfb && Xvfb :99 -ac &"
             ) from e
 
-    def _get_block_dist(self, obs) -> Optional[float]:
-        """Shaping distance metric — returns None if unavailable (no crash).
+    def _cache_pybullet_block_ids(self, effector_xy=None):
+        """Scan pybullet bodies and cache IDs of objects that look like blocks.
 
-        Priority order (FIXED vs MOVING goal):
-          1. ||start_block − target_block|| — FIXED goal: block-to-block distance.
-             Decreases only when the robot actually pushes the block toward its
-             target.  Gives true task-progress signal for shaping.
-          2. ||effector − effector_target|| — MOVING goal: oracle target updates
-             every step, so the telescoping sum ≈ 0 over an episode.  Kept as
-             fallback only (e.g., if block positions are not in obs).
-
-        NOTE on oracle-target shaping: because effector_target_translation is the
-        oracle controller's greedy output at each timestep (a function of current
-        state), it moves as the robot moves.  The telescoping shaping sum
-        Σ(prev−cur)×scale = (dist_t0 − dist_tN)×scale collapses to ≈ 0 whenever
-        the oracle target tracks the effector — giving no learning signal.
+        Blocks sit on the table surface at z ≈ 0.03–0.08 m.  We collect every
+        body in that z band and exclude the body closest to the effector (that is
+        the end-effector tip, not a block).  Called once per episode on reset so
+        body IDs are refreshed if the environment recreates the scene.
         """
-        if not isinstance(obs, dict):
-            return None
-        # ── Priority 1 (FIXED goal): block-to-block distance ─────────────────
-        # LT dm_env obs includes {color}_block_translation for all blocks.
-        # BlockToBlockReward stores _start_block/_target_block names.
         try:
-            rc = getattr(self._env, "_reward_calculator", None)
-            if rc is not None:
-                sb = getattr(rc, "_start_block",  None)
-                tb = getattr(rc, "_target_block", None)
-                if sb and tb:
-                    sk, tk = f"{sb}_translation", f"{tb}_translation"
-                    if sk in obs and tk in obs:
-                        sp = np.asarray(obs[sk], dtype=np.float32).ravel()[:2]
-                        tp = np.asarray(obs[tk], dtype=np.float32).ravel()[:2]
-                        return float(np.linalg.norm(sp - tp))
+            import pybullet as pb
+            candidates = []
+            for body_id in range(pb.getNumBodies()):
+                try:
+                    pos, _ = pb.getBasePositionAndOrientation(body_id)
+                    z  = pos[2]
+                    xy = np.array(pos[:2], dtype=np.float32)
+                    if 0.01 <= z <= 0.12:
+                        candidates.append((body_id, xy))
+                except Exception:
+                    continue
+
+            if effector_xy is not None and len(candidates) > 1:
+                # Remove the body that coincides with the effector position
+                candidates = sorted(candidates,
+                    key=lambda t: float(np.linalg.norm(t[1] - effector_xy)))
+                candidates = candidates[1:]   # drop closest = effector tip
+
+            self._pb_block_ids = [bid for bid, _ in candidates]
         except Exception:
-            pass
-        # ── Priority 2 (MOVING goal, fallback): effector-to-oracle-target ─────
-        # Only use if block positions not available. Oracle target moves every
-        # step so net shaping ≈ 0, but at least confirms shaping is wired up.
-        try:
-            eff = obs.get("effector_translation")
-            tgt = obs.get("effector_target_translation")
-            if eff is not None and tgt is not None:
-                ep = np.asarray(eff, dtype=np.float32).ravel()[:2]
-                tp = np.asarray(tgt, dtype=np.float32).ravel()[:2]
-                return float(np.linalg.norm(ep - tp))
-        except Exception:
-            pass
-        return None
+            self._pb_block_ids = []
+
+    def _get_block_dist(self, obs) -> Optional[float]:
+        """Shaping distance metric — block-to-block distance via obs dict or pybullet.
+
+        Priority 1: any non-effector *_translation keys in the obs dict.
+          LT may use colour-prefixed names ('red_translation', 'blue_block_translation',
+          etc.).  We accept any key that has 'translation' but not 'effector'.
+
+        Priority 2: pybullet direct query using cached body IDs.
+          Language-Table IS a pybullet simulation.  After reset we scan all bodies
+          at table-surface height (z ≈ 0.01–0.12 m), cache their body IDs, and
+          query positions each step.  This gives real block-to-block distance even
+          when the obs dict does not expose block positions.
+
+        No oracle-target fallback: ‖effector − effector_target‖ ≈ 0 at reset
+        (oracle target is initialised to the current effector position) and
+        telescopes to ≈ 0 over the episode, giving zero gradient.
+        """
+        # ── Priority 1: obs dict (broadened — any non-effector *_translation) ─
+        if isinstance(obs, dict):
+            non_eff = [(k, v) for k, v in obs.items()
+                       if "translation" in k.lower() and "effector" not in k.lower()]
+            if len(non_eff) >= 2:
+                p1 = np.asarray(non_eff[0][1], dtype=np.float32).ravel()[:2]
+                p2 = np.asarray(non_eff[1][1], dtype=np.float32).ravel()[:2]
+                return float(np.linalg.norm(p1 - p2))
+
+        # ── Priority 2: pybullet direct query ─────────────────────────────────
+        block_ids = getattr(self, "_pb_block_ids", None)
+        if block_ids is None:
+            # Cache not populated yet — build it now (should have run at reset)
+            eff_xy = None
+            if isinstance(obs, dict) and "effector_translation" in obs:
+                eff_xy = np.asarray(obs["effector_translation"],
+                                    dtype=np.float32).ravel()[:2]
+            self._cache_pybullet_block_ids(eff_xy)
+            block_ids = self._pb_block_ids
+
+        if block_ids and len(block_ids) >= 2:
+            try:
+                import pybullet as pb
+                positions = []
+                for bid in block_ids:
+                    pos, _ = pb.getBasePositionAndOrientation(bid)
+                    positions.append(np.array(pos[:2], dtype=np.float32))
+                if len(positions) >= 2:
+                    return float(np.linalg.norm(positions[0] - positions[1]))
+            except Exception:
+                self._pb_block_ids = None   # stale IDs — will re-scan next call
+
+        return None   # shaping unavailable this step
 
     def _unpack_timestep(self, timestep):
         """Extract (obs_dict, reward, done) from a dm_env TimeStep or gym tuple."""
@@ -625,17 +658,32 @@ class LanguageTableEnv(BaseEnv):
             obs = result[0]
         else:
             obs = result
-        # ── One-time diagnostic: print raw obs keys so we know what's available ─
+
+        # ── Refresh pybullet block-ID cache every episode ─────────────────────
+        # Body IDs may change if the env recreates the scene on reset.
+        self._pb_block_ids = None   # force re-scan in _get_block_dist / _cache
+        eff_xy = None
+        if isinstance(obs, dict) and "effector_translation" in obs:
+            eff_xy = np.asarray(obs["effector_translation"],
+                                dtype=np.float32).ravel()[:2]
+        self._cache_pybullet_block_ids(eff_xy)
+
+        # ── One-time diagnostic: print shaping source ─────────────────────────
         if not getattr(self, "_obs_keys_printed", False):
             self._obs_keys_printed = True
             if isinstance(obs, dict):
                 _keys = list(obs.keys())
-                _block_keys = [k for k in _keys if "block" in k.lower() and "translation" in k]
+                _non_eff_t = [k for k in _keys
+                              if "translation" in k.lower() and "effector" not in k.lower()]
                 print(f"[LT obs keys] {_keys}")
-                print(f"[LT block translation keys] {_block_keys}")
+                print(f"[LT non-effector translation keys] {_non_eff_t}")
                 d0 = self._get_block_dist(obs)
-                print(f"[LT shaping] _get_block_dist={d0}  scale={self._shaping_scale}  "
-                      f"{'(block-based ✓)' if _block_keys else '(oracle-target fallback)'}")
+                n_pb = len(getattr(self, "_pb_block_ids", []))
+                src  = ("obs-dict" if _non_eff_t
+                        else f"pybullet({n_pb} bodies)" if d0 is not None
+                        else "UNAVAILABLE — shaping disabled")
+                print(f"[LT shaping] block_dist={d0:.4f}  scale={self._shaping_scale}"
+                      f"  source={src}")
             else:
                 print(f"[LT obs] type={type(obs).__name__} — not a dict, shaping disabled")
 
