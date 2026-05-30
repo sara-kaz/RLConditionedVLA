@@ -541,55 +541,95 @@ class LanguageTableEnv(BaseEnv):
                 "Headless: apt-get install -y xvfb && Xvfb :99 -ac &"
             ) from e
 
+    def _get_pb_client(self):
+        """Return the pybullet client used by the LT environment (or None).
+
+        Language-Table wraps pybullet in a BulletClient at _physics or
+        _pybullet_client.  Using the env's own client ensures we query the
+        correct physics-server ID rather than the default global one.
+        """
+        for attr in ("_pybullet_client", "_physics", "physics", "_bullet_client"):
+            client = getattr(self._env, attr, None)
+            if client is not None:
+                return client
+        # Last resort: raw pybullet module (works only if single-server setup)
+        try:
+            import pybullet as pb
+            return pb
+        except ImportError:
+            return None
+
+    def _pb_get_pos(self, pb_client, body_id):
+        """Call getBasePositionAndOrientation via whatever client we have."""
+        return pb_client.getBasePositionAndOrientation(body_id)[0]
+
+    def _pb_num_bodies(self, pb_client):
+        """Return number of bodies in the physics simulation."""
+        try:
+            return pb_client.getNumBodies()
+        except Exception:
+            return 0
+
     def _cache_pybullet_block_ids(self, effector_xy=None):
         """Scan pybullet bodies and cache IDs of objects that look like blocks.
 
-        Blocks sit on the table surface at z ≈ 0.03–0.08 m.  We collect every
-        body in that z band and exclude the body closest to the effector (that is
-        the end-effector tip, not a block).  Called once per episode on reset so
-        body IDs are refreshed if the environment recreates the scene.
+        Blocks sit on the table surface.  We accept any body in a wide z-band
+        (-0.5 to +1.0 m) to stay robust to different table heights, then exclude
+        the body closest to the effector position (the end-effector tip).
+        Called once per episode on reset so IDs stay correct across resets.
         """
+        pb = self._get_pb_client()
+        if pb is None:
+            self._pb_block_ids = []
+            return
+
+        candidates = []
         try:
-            import pybullet as pb
-            candidates = []
-            for body_id in range(pb.getNumBodies()):
+            n = self._pb_num_bodies(pb)
+            for body_id in range(n):
                 try:
-                    pos, _ = pb.getBasePositionAndOrientation(body_id)
+                    pos = self._pb_get_pos(pb, body_id)
                     z  = pos[2]
                     xy = np.array(pos[:2], dtype=np.float32)
-                    if 0.01 <= z <= 0.12:
-                        candidates.append((body_id, xy))
+                    if -0.5 <= z <= 1.0:   # wide band — covers any table height
+                        candidates.append((body_id, xy, z))
                 except Exception:
                     continue
-
-            if effector_xy is not None and len(candidates) > 1:
-                # Remove the body that coincides with the effector position
-                candidates = sorted(candidates,
-                    key=lambda t: float(np.linalg.norm(t[1] - effector_xy)))
-                candidates = candidates[1:]   # drop closest = effector tip
-
-            self._pb_block_ids = [bid for bid, _ in candidates]
         except Exception:
             self._pb_block_ids = []
+            return
+
+        # Sort by z ascending — blocks sit near table surface, robot base is
+        # typically the lowest or highest body.  Keep the "mid-z" cluster.
+        if candidates:
+            zs = np.array([z for _, _, z in candidates])
+            # Use bodies near the median z (± 0.15 m) as candidate blocks
+            med_z = float(np.median(zs))
+            candidates = [(bid, xy) for bid, xy, z in candidates
+                          if abs(z - med_z) <= 0.15]
+
+        # Exclude the body coinciding with the effector tip
+        if effector_xy is not None and len(candidates) > 1:
+            candidates = sorted(candidates,
+                key=lambda t: float(np.linalg.norm(t[1] - effector_xy)))
+            candidates = candidates[1:]   # drop closest = effector
+
+        self._pb_block_ids = [bid for bid, _ in candidates]
 
     def _get_block_dist(self, obs) -> Optional[float]:
-        """Shaping distance metric — block-to-block distance via obs dict or pybullet.
+        """Shaping distance metric — block-to-block distance.
 
         Priority 1: any non-effector *_translation keys in the obs dict.
-          LT may use colour-prefixed names ('red_translation', 'blue_block_translation',
-          etc.).  We accept any key that has 'translation' but not 'effector'.
+          LT may use colour-prefixed names ('red_translation', etc.).
 
         Priority 2: pybullet direct query using cached body IDs.
-          Language-Table IS a pybullet simulation.  After reset we scan all bodies
-          at table-surface height (z ≈ 0.01–0.12 m), cache their body IDs, and
-          query positions each step.  This gives real block-to-block distance even
-          when the obs dict does not expose block positions.
+          Language-Table is a pybullet simulation.  After reset we identify
+          block body IDs and query their positions each step, giving real
+          block-to-block distance even when the obs dict hides block positions.
 
-        No oracle-target fallback: ‖effector − effector_target‖ ≈ 0 at reset
-        (oracle target is initialised to the current effector position) and
-        telescopes to ≈ 0 over the episode, giving zero gradient.
+        No oracle-target fallback (||effector - effector_target|| ≈ 0 always).
         """
-        # ── Priority 1: obs dict (broadened — any non-effector *_translation) ─
+        # ── Priority 1: obs dict (any non-effector *_translation key) ─────────
         if isinstance(obs, dict):
             non_eff = [(k, v) for k, v in obs.items()
                        if "translation" in k.lower() and "effector" not in k.lower()]
@@ -601,7 +641,6 @@ class LanguageTableEnv(BaseEnv):
         # ── Priority 2: pybullet direct query ─────────────────────────────────
         block_ids = getattr(self, "_pb_block_ids", None)
         if block_ids is None:
-            # Cache not populated yet — build it now (should have run at reset)
             eff_xy = None
             if isinstance(obs, dict) and "effector_translation" in obs:
                 eff_xy = np.asarray(obs["effector_translation"],
@@ -610,16 +649,14 @@ class LanguageTableEnv(BaseEnv):
             block_ids = self._pb_block_ids
 
         if block_ids and len(block_ids) >= 2:
-            try:
-                import pybullet as pb
-                positions = []
-                for bid in block_ids:
-                    pos, _ = pb.getBasePositionAndOrientation(bid)
-                    positions.append(np.array(pos[:2], dtype=np.float32))
-                if len(positions) >= 2:
+            pb = self._get_pb_client()
+            if pb is not None:
+                try:
+                    positions = [np.array(self._pb_get_pos(pb, bid)[:2], dtype=np.float32)
+                                 for bid in block_ids]
                     return float(np.linalg.norm(positions[0] - positions[1]))
-            except Exception:
-                self._pb_block_ids = None   # stale IDs — will re-scan next call
+                except Exception:
+                    self._pb_block_ids = None   # stale — re-scan next call
 
         return None   # shaping unavailable this step
 
@@ -682,8 +719,27 @@ class LanguageTableEnv(BaseEnv):
                 src  = ("obs-dict" if _non_eff_t
                         else f"pybullet({n_pb} bodies)" if d0 is not None
                         else "UNAVAILABLE — shaping disabled")
-                print(f"[LT shaping] block_dist={d0:.4f}  scale={self._shaping_scale}"
+                d0_str = f"{d0:.4f}" if d0 is not None else "None"
+                n_pb   = len(getattr(self, "_pb_block_ids", []))
+                print(f"[LT shaping] block_dist={d0_str}  scale={self._shaping_scale}"
                       f"  source={src}")
+                # If pybullet found nothing, dump all bodies for diagnosis
+                if d0 is None:
+                    pb = self._get_pb_client()
+                    if pb is not None:
+                        try:
+                            n_tot = self._pb_num_bodies(pb)
+                            print(f"[LT pybullet] {n_tot} total bodies:")
+                            for _bid in range(min(n_tot, 20)):
+                                try:
+                                    _pos = self._pb_get_pos(pb, _bid)
+                                    print(f"  body {_bid}: z={_pos[2]:.3f}  xy=({_pos[0]:.3f},{_pos[1]:.3f})")
+                                except Exception:
+                                    print(f"  body {_bid}: (pos query failed)")
+                        except Exception as _pbe:
+                            print(f"[LT pybullet] dump failed: {_pbe}")
+                    else:
+                        print("[LT pybullet] no client found")
             else:
                 print(f"[LT obs] type={type(obs).__name__} — not a dict, shaping disabled")
 
