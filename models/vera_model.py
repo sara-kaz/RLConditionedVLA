@@ -904,6 +904,49 @@ class VERAModel(nn.Module):
         _vtd = float(vision_token_dropout)
         self.vis_token_dropout = nn.Dropout(_vtd) if _vtd > 0 else None
 
+        # ── Visual Domain Adapter [TERA-RL, NOVEL] ────────────────────────────
+        # Bridges the sim-to-real visual gap when fine-tuning with RL in
+        # simulation after SFT on real robot data.
+        #
+        # Placed AFTER vis_proj so it operates in the d_model feature space
+        # (not raw CLIP space). The residual design initialises to the identity
+        # map — SFT performance is fully preserved at the start of RL and the
+        # adapter learns a domain correction incrementally.
+        #
+        # Architecture: expand → normalise → activate → compress → normalise
+        #   d_model → 2*d_model → d_model   (bottleneck ~= 3*d_model² params)
+        # At d_model=256: 256→512→256 ≈ 262K params — manageable with REINFORCE.
+        #
+        # Only instantiated when use_visual_adapter=True (default: False so
+        # existing checkpoints load without modification).
+        self.use_visual_adapter = False   # overridden by enable_visual_adapter()
+        _adapter_dim = d_model * 2
+        self.vis_adapter = nn.Sequential(
+            nn.Linear(d_model, _adapter_dim, bias=False),
+            nn.LayerNorm(_adapter_dim),
+            nn.GELU(),
+            nn.Linear(_adapter_dim, d_model, bias=False),
+            nn.LayerNorm(d_model),
+        )
+        # Residual init: zero-init the output projection so adapter starts
+        # as identity (x + 0·f(x) = x). SFT checkpoint can be loaded
+        # without any shape mismatch — adapter weights just sit at zero.
+        nn.init.zeros_(self.vis_adapter[3].weight)   # output Linear → zeros
+        # Freeze adapter by default; enable_visual_adapter() makes it trainable
+        for p in self.vis_adapter.parameters():
+            p.requires_grad = False
+
+    def enable_visual_adapter(self):
+        """Activate the visual domain adapter and make its params trainable.
+
+        Call this in the RL trainer AFTER loading the SFT checkpoint.
+        The adapter starts as an identity map (zero-init output projection)
+        and learns a sim-to-real domain correction during RL fine-tuning.
+        """
+        self.use_visual_adapter = True
+        for p in self.vis_adapter.parameters():
+            p.requires_grad = True
+
         # ── Stream 3: Action Language Feedback Encoder [NOVEL] ───────────────
         if use_lang_feedback:
             self.action_lang_encoder = ActionLanguageFeedbackEncoder(
@@ -1012,7 +1055,10 @@ class VERAModel(nn.Module):
         flat = frames.view(B * T, C, H, W)
         with torch.set_grad_enabled(self._clip_grad()):
             feats = self.clip_model.encode_image(flat).float()
-        return self.vis_proj(feats.view(B, T, -1))   # (B, T, d_model)
+        vis = self.vis_proj(feats.view(B, T, -1))    # (B, T, d_model)
+        if self.use_visual_adapter:
+            vis = vis + self.vis_adapter(vis)         # residual: identity at init
+        return vis
 
     def encode_instruction(self, lang_tokens: torch.Tensor):
         with torch.set_grad_enabled(self._clip_grad()):

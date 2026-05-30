@@ -472,16 +472,23 @@ def rl_train(cfg: dict):
     else:
         print("[rl_vera] Warning: no BC checkpoint — training RL from scratch.")
 
-    # ── Freeze backbone; train only action head (TERA-RL) ─────────────────────
-    # Backbone: CLIP + projections + lang_feedback_encoder + fusion_transformer + cls_token
-    # Trainable: action_head only (~2K params vs ~100K total)
-    _action_head_params = set(id(p) for p in model.action_head.parameters())
-    for name, p in model.named_parameters():
-        p.requires_grad = id(p) in _action_head_params
+    # ── Freeze backbone; train action_head + visual domain adapter (TERA-RL) ───
+    # 1. Freeze everything first.
+    # 2. Unfreeze action_head (task policy, ~265K params).
+    # 3. Enable + unfreeze vis_adapter (sim-to-real visual correction, ~262K params).
+    #    The adapter sits between vis_proj and the fusion transformer — fixing the
+    #    visual feature distribution for simulation images benefits ALL downstream
+    #    processing (transformer, cls_token, action head).
+    for p in model.parameters():
+        p.requires_grad = False
+    for p in model.action_head.parameters():
+        p.requires_grad = True
+    model.enable_visual_adapter()   # zero-init residual adapter, now trainable
+
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_total     = sum(p.numel() for p in model.parameters())
     print(f"[rl_vera] Trainable: {n_trainable:,} / {n_total:,} params "
-          f"(action_head only, backbone frozen)")
+          f"(action_head + vis_adapter, backbone frozen)")
 
     value_head = ValueHead(d_model=cfg["model"].get("d_model", 256)).to(device)
 
