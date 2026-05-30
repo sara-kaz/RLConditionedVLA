@@ -544,32 +544,25 @@ class LanguageTableEnv(BaseEnv):
     def _get_block_dist(self, obs) -> Optional[float]:
         """Shaping distance metric — returns None if unavailable (no crash).
 
-        Confirmed LT observation keys (from live Colab diagnostic, May 2026):
-          'effector_translation'        — arm tip XY position (shape 2)
-          'effector_target_translation' — oracle next arm position (shape 2)
-          'rgb'                         — camera image (180×320×3)
-          'instruction'                 — tokenised instruction (512 int32)
-        Block XY positions are NOT exposed in this LT package version.
+        Priority order (FIXED vs MOVING goal):
+          1. ||start_block − target_block|| — FIXED goal: block-to-block distance.
+             Decreases only when the robot actually pushes the block toward its
+             target.  Gives true task-progress signal for shaping.
+          2. ||effector − effector_target|| — MOVING goal: oracle target updates
+             every step, so the telescoping sum ≈ 0 over an episode.  Kept as
+             fallback only (e.g., if block positions are not in obs).
 
-        Strategy (priority order):
-          1. ||effector − effector_target|| — always present in LT obs;
-             gives a dense imitation signal (arm closer to oracle pos = better).
-          2. ||start_block − target_block|| — fallback if a future LT version
-             adds per-block translation keys to the observation.
+        NOTE on oracle-target shaping: because effector_target_translation is the
+        oracle controller's greedy output at each timestep (a function of current
+        state), it moves as the robot moves.  The telescoping shaping sum
+        Σ(prev−cur)×scale = (dist_t0 − dist_tN)×scale collapses to ≈ 0 whenever
+        the oracle target tracks the effector — giving no learning signal.
         """
         if not isinstance(obs, dict):
             return None
-        # ── Priority 1: effector-to-oracle-target distance ────────────────────
-        try:
-            eff = obs.get("effector_translation")
-            tgt = obs.get("effector_target_translation")
-            if eff is not None and tgt is not None:
-                ep = np.asarray(eff, dtype=np.float32).ravel()[:2]
-                tp = np.asarray(tgt, dtype=np.float32).ravel()[:2]
-                return float(np.linalg.norm(ep - tp))
-        except Exception:
-            pass
-        # ── Priority 2: block-to-block distance (future LT versions) ──────────
+        # ── Priority 1 (FIXED goal): block-to-block distance ─────────────────
+        # LT dm_env obs includes {color}_block_translation for all blocks.
+        # BlockToBlockReward stores _start_block/_target_block names.
         try:
             rc = getattr(self._env, "_reward_calculator", None)
             if rc is not None:
@@ -581,6 +574,18 @@ class LanguageTableEnv(BaseEnv):
                         sp = np.asarray(obs[sk], dtype=np.float32).ravel()[:2]
                         tp = np.asarray(obs[tk], dtype=np.float32).ravel()[:2]
                         return float(np.linalg.norm(sp - tp))
+        except Exception:
+            pass
+        # ── Priority 2 (MOVING goal, fallback): effector-to-oracle-target ─────
+        # Only use if block positions not available. Oracle target moves every
+        # step so net shaping ≈ 0, but at least confirms shaping is wired up.
+        try:
+            eff = obs.get("effector_translation")
+            tgt = obs.get("effector_target_translation")
+            if eff is not None and tgt is not None:
+                ep = np.asarray(eff, dtype=np.float32).ravel()[:2]
+                tp = np.asarray(tgt, dtype=np.float32).ravel()[:2]
+                return float(np.linalg.norm(ep - tp))
         except Exception:
             pass
         return None
@@ -620,6 +625,20 @@ class LanguageTableEnv(BaseEnv):
             obs = result[0]
         else:
             obs = result
+        # ── One-time diagnostic: print raw obs keys so we know what's available ─
+        if not getattr(self, "_obs_keys_printed", False):
+            self._obs_keys_printed = True
+            if isinstance(obs, dict):
+                _keys = list(obs.keys())
+                _block_keys = [k for k in _keys if "block" in k.lower() and "translation" in k]
+                print(f"[LT obs keys] {_keys}")
+                print(f"[LT block translation keys] {_block_keys}")
+                d0 = self._get_block_dist(obs)
+                print(f"[LT shaping] _get_block_dist={d0}  scale={self._shaping_scale}  "
+                      f"{'(block-based ✓)' if _block_keys else '(oracle-target fallback)'}")
+            else:
+                print(f"[LT obs] type={type(obs).__name__} — not a dict, shaping disabled")
+
         # Initialise shaped-reward baseline for this episode
         self._prev_block_dist = self._get_block_dist(obs)
         return {"frame": self._extract_frame(obs),
