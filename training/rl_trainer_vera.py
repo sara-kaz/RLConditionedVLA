@@ -363,24 +363,33 @@ def rl_update_batch(
     """
     REINFORCE + value-baseline update over an entire epoch of rollout buffers.
 
-    Returns are standardised **per buffer** before concatenation so that a
-    single high-reward episode cannot dominate the advantage signal — this is
-    the key stability improvement over the per-rollout update scheme.
-    All buffers are then concatenated into one forward / backward pass for a
-    lower-variance, better-calibrated gradient estimate.
+    Two key stability improvements over the per-rollout scheme:
+
+    1. Per-buffer return standardisation: returns are normalised *within* each
+       episode buffer before concatenation, so a single high-reward rollout
+       cannot dominate the advantage signal.
+
+    2. Gradient accumulation: the combined N_total transitions (up to
+       num_rollouts × max_episode_steps = 3200 for the default 16×200 config)
+       are processed in mini-batches of `rl.minibatch_size` (default 64),
+       accumulating gradients across mini-batches and doing ONE optimizer step.
+       Peak VRAM is O(minibatch_size) rather than O(N_total), preventing OOM
+       when the BC model's CLIP forward pass follows the policy forward.
     """
     model.train()
     value_head.train()
 
-    _num_act      = cfg["model"]["num_actions"]
-    _action_dim   = cfg["model"].get("action_dim", 4)
-    gamma         = cfg["rl"].get("gamma", 0.99)
-    vf_coef       = cfg["rl"].get("vf_coef", 0.5)
-    entropy_coef  = cfg["rl"].get("entropy_coef", 0.01)
-    kl_coef       = cfg["rl"].get("kl_coef", 0.1)
-    entropy_floor = cfg["rl"].get("entropy_floor", 0.7)
+    _num_act       = cfg["model"]["num_actions"]
+    _action_dim    = cfg["model"].get("action_dim", 4)
+    gamma          = cfg["rl"].get("gamma", 0.99)
+    vf_coef        = cfg["rl"].get("vf_coef", 0.5)
+    entropy_coef   = cfg["rl"].get("entropy_coef", 0.01)
+    kl_coef        = cfg["rl"].get("kl_coef", 0.1)
+    entropy_floor  = cfg["rl"].get("entropy_floor", 0.7)
+    minibatch_size = int(cfg["rl"].get("minibatch_size", 64))
 
     # ── Collect per-buffer tensors, standardising returns within each buffer ──
+    # All tensors kept on CPU until sliced into mini-batches to save VRAM.
     all_returns      = []
     all_frames       = []
     all_lang_tokens  = []
@@ -397,20 +406,19 @@ def rl_update_batch(
             continue
 
         # Per-buffer discounted returns, already standardised inside compute_returns()
-        returns = buf.compute_returns(gamma=gamma).to(device)
-        all_returns.append(returns)
+        # Keep on CPU — will be sliced and moved per mini-batch
+        all_returns.append(buf.compute_returns(gamma=gamma))
 
-        all_frames.append(torch.stack(buf.frames))
-        all_lang_tokens.append(torch.stack(buf.lang_tokens))
-        all_act_hist.append(torch.stack(buf.action_hists))
-        all_rew_hist.append(torch.stack(buf.reward_hists))
+        all_frames.append(torch.stack(buf.frames))                        # CPU
+        all_lang_tokens.append(torch.stack(buf.lang_tokens))              # CPU
+        all_act_hist.append(torch.stack(buf.action_hists))                # CPU
+        all_rew_hist.append(torch.stack(buf.reward_hists))                # CPU
         all_prev_actions.append(torch.stack(buf.prev_actions).view(-1).long())
         all_prev_rewards.append(torch.stack(buf.prev_rewards_fb).view(-1).float())
         all_state_deltas.append(torch.stack(buf.state_deltas).view(-1).float())
         all_actions.append(torch.tensor(buf.actions, dtype=torch.long))
 
-        # Low-level action vector history (H, action_dim) per step
-        # buf.action_hists[i] is shape (H,) — use first entry to get H
+        # Low-level action vector history — (N_buf, H, action_dim)
         _history_len = buf.action_hists[0].size(0) if buf.action_hists else 0
         if any(v is None for v in buf.action_vec_hists):
             avh = torch.zeros(len(buf.action_vec_hists), _history_len, _action_dim)
@@ -418,73 +426,100 @@ def rl_update_batch(
                 if _v is not None:
                     avh[_i] = _v
         else:
-            avh = torch.stack(buf.action_vec_hists)  # (N_buf, H, action_dim)
+            avh = torch.stack(buf.action_vec_hists)
         all_act_vec_hist.append(avh)
 
     if not all_returns:
-        # Nothing to learn from (all buffers empty — shouldn't happen)
         return {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0,
                 "kl_loss":     0.0, "total_loss": 0.0, "mean_return": 0.0}
 
-    # ── Concatenate into one big batch ────────────────────────────────────────
-    returns      = torch.cat(all_returns,      dim=0)                         # (N_total,)
-    frames       = torch.cat(all_frames,       dim=0).to(device)              # (N_total, T, 3, H, W)
-    lang_tokens  = torch.cat(all_lang_tokens,  dim=0).to(device)              # (N_total, 77)
-    act_hist     = torch.cat(all_act_hist,     dim=0).to(device)              # (N_total, H)
-    rew_hist     = torch.cat(all_rew_hist,     dim=0).to(device)              # (N_total, H)
-    prev_actions = torch.cat(all_prev_actions, dim=0).to(device)              # (N_total,)
-    prev_rewards = torch.cat(all_prev_rewards, dim=0).to(device)              # (N_total,)
-    state_deltas = torch.cat(all_state_deltas, dim=0).to(device)              # (N_total,)
-    actions      = torch.cat(all_actions,      dim=0).to(device)              # (N_total,)
-    act_vec_hist = torch.cat(all_act_vec_hist, dim=0).to(device)              # (N_total, H, D_a)
+    # ── Concatenate all buffers (still on CPU) ────────────────────────────────
+    returns_cpu      = torch.cat(all_returns,      dim=0)   # (N_total,)
+    frames_cpu       = torch.cat(all_frames,       dim=0)   # (N_total, T, 3, H, W)
+    lang_tokens_cpu  = torch.cat(all_lang_tokens,  dim=0)   # (N_total, 77)
+    act_hist_cpu     = torch.cat(all_act_hist,     dim=0)   # (N_total, H)
+    rew_hist_cpu     = torch.cat(all_rew_hist,     dim=0)   # (N_total, H)
+    prev_actions_cpu = torch.cat(all_prev_actions, dim=0)   # (N_total,)
+    prev_rewards_cpu = torch.cat(all_prev_rewards, dim=0)   # (N_total,)
+    state_deltas_cpu = torch.cat(all_state_deltas, dim=0)   # (N_total,)
+    actions_cpu      = torch.cat(all_actions,      dim=0)   # (N_total,)
+    act_vec_hist_cpu = torch.cat(all_act_vec_hist, dim=0)   # (N_total, H, D_a)
 
-    # ── Single forward pass over combined batch ───────────────────────────────
-    out      = model(frames, lang_tokens, act_hist, rew_hist,
-                     prev_actions, prev_rewards,
-                     state_delta=state_deltas, action_vec_hist=act_vec_hist)
-    logits   = out["logits"][:, :_num_act]   # (N_total, A) — first chunk only
-    cls_feat = out["cls_features"]           # (N_total, D)
+    N_total = len(actions_cpu)
+    H_max   = torch.log(torch.tensor(float(_num_act)))
 
-    # Value estimate (detach policy grad; value head has its own path)
-    values    = value_head(cls_feat.detach())      # (N_total,)
-    advantage = returns - values.detach()           # Â_t = G_t - V(s_t)
-
-    # REINFORCE policy gradient
-    log_probs   = F.log_softmax(logits, dim=-1)
-    chosen_logp = log_probs[torch.arange(len(actions)), actions]
-    policy_loss = -(chosen_logp * advantage).mean()
-
-    # Value baseline MSE
-    value_loss = F.mse_loss(values, returns)
-
-    # Entropy bonus
-    probs   = F.softmax(logits, dim=-1)
-    entropy = -(probs * log_probs).sum(-1).mean()
-
-    # KL penalty vs BC anchor (prevents catastrophic forgetting)
-    kl_loss = torch.tensor(0.0, device=device)
-    if bc_model is not None:
-        bc_model.eval()
-        with torch.no_grad():
-            bc_out   = bc_model(frames, lang_tokens, act_hist, rew_hist,
-                                prev_actions, prev_rewards,
-                                state_delta=state_deltas,
-                                action_vec_hist=act_vec_hist)
-            bc_probs = F.softmax(bc_out["logits"][:, :_num_act], dim=-1)
-        kl_loss = F.kl_div(log_probs, bc_probs, reduction="batchmean")
-
-    # Entropy floor penalty (same as rl_update: penalise collapse only)
-    H_max           = torch.log(torch.tensor(float(_num_act)))
-    entropy_penalty = F.relu(entropy_floor * H_max - entropy)
-
-    total_loss = (policy_loss
-                  + vf_coef      * value_loss
-                  - entropy_coef * entropy
-                  + kl_coef      * kl_loss
-                  + entropy_penalty)
-
+    # ── Gradient accumulation — one optimizer step for the whole epoch ────────
     optimizer.zero_grad()
-    total_loss.backward()
+
+    acc_policy = 0.0
+    acc_value  = 0.0
+    acc_ent    = 0.0
+    acc_kl     = 0.0
+    acc_total  = 0.0
+
+    for mb_s in range(0, N_total, minibatch_size):
+        mb_e      = min(mb_s + minibatch_size, N_total)
+        mb_weight = (mb_e - mb_s) / N_total   # fraction — scales gradient contribution
+
+        # Move this mini-batch to GPU
+        mb_ret      = returns_cpu     [mb_s:mb_e].to(device)
+        mb_frames   = frames_cpu      [mb_s:mb_e].to(device)
+        mb_lang     = lang_tokens_cpu [mb_s:mb_e].to(device)
+        mb_ah       = act_hist_cpu    [mb_s:mb_e].to(device)
+        mb_rh       = rew_hist_cpu    [mb_s:mb_e].to(device)
+        mb_pa       = prev_actions_cpu[mb_s:mb_e].to(device)
+        mb_pr       = prev_rewards_cpu[mb_s:mb_e].to(device)
+        mb_sd       = state_deltas_cpu[mb_s:mb_e].to(device)
+        mb_actions  = actions_cpu     [mb_s:mb_e].to(device)
+        mb_avh      = act_vec_hist_cpu[mb_s:mb_e].to(device)
+
+        # ── Policy forward ────────────────────────────────────────────────────
+        out      = model(mb_frames, mb_lang, mb_ah, mb_rh,
+                         mb_pa, mb_pr,
+                         state_delta=mb_sd, action_vec_hist=mb_avh)
+        logits   = out["logits"][:, :_num_act]    # (mb, A)
+        cls_feat = out["cls_features"]            # (mb, D)
+
+        values    = value_head(cls_feat.detach())  # (mb,)
+        advantage = mb_ret - values.detach()
+
+        log_probs   = F.log_softmax(logits, dim=-1)
+        chosen_logp = log_probs[torch.arange(len(mb_actions)), mb_actions]
+        policy_loss = -(chosen_logp * advantage).mean()
+
+        value_loss  = F.mse_loss(values, mb_ret)
+
+        probs   = F.softmax(logits, dim=-1)
+        entropy = -(probs * log_probs).sum(-1).mean()
+
+        # ── BC KL (same mini-batch — no extra VRAM spike) ────────────────────
+        kl_loss = torch.tensor(0.0, device=device)
+        if bc_model is not None:
+            bc_model.eval()
+            with torch.no_grad():
+                bc_out   = bc_model(mb_frames, mb_lang, mb_ah, mb_rh,
+                                    mb_pa, mb_pr,
+                                    state_delta=mb_sd, action_vec_hist=mb_avh)
+                bc_probs = F.softmax(bc_out["logits"][:, :_num_act], dim=-1)
+            kl_loss = F.kl_div(log_probs, bc_probs, reduction="batchmean")
+
+        entropy_penalty = F.relu(entropy_floor * H_max - entropy)
+
+        total_loss = (policy_loss
+                      + vf_coef      * value_loss
+                      - entropy_coef * entropy
+                      + kl_coef      * kl_loss
+                      + entropy_penalty)
+
+        # Scale by mini-batch fraction so accumulated gradient ≡ full-batch gradient
+        (total_loss * mb_weight).backward()
+
+        acc_policy += policy_loss.item() * mb_weight
+        acc_value  += value_loss.item()  * mb_weight
+        acc_ent    += entropy.item()     * mb_weight
+        acc_kl     += kl_loss.item()     * mb_weight
+        acc_total  += total_loss.item()  * mb_weight
+
     nn.utils.clip_grad_norm_(
         list(p for p in model.parameters() if p.requires_grad)
         + list(value_head.parameters()),
@@ -493,12 +528,12 @@ def rl_update_batch(
     optimizer.step()
 
     return {
-        "policy_loss": policy_loss.item(),
-        "value_loss":  value_loss.item(),
-        "entropy":     entropy.item(),
-        "kl_loss":     kl_loss.item(),
-        "total_loss":  total_loss.item(),
-        "mean_return": returns.mean().item(),
+        "policy_loss": acc_policy,
+        "value_loss":  acc_value,
+        "entropy":     acc_ent,
+        "kl_loss":     acc_kl,
+        "total_loss":  acc_total,
+        "mean_return": returns_cpu.mean().item(),
     }
 
 
