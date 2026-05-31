@@ -118,7 +118,7 @@ rl:
   num_rollouts:        4         # rollout episodes per gradient update
   max_episode_steps:   50
   gamma:               0.99      # discount factor
-  lr:                  1e-5      # lower than SFT to prevent catastrophic forgetting
+  lr:                  3e-5      # 3× SFT floor; higher needed when reward signal is sparse
   weight_decay:        1e-4
   grad_clip:           1.0
   entropy_coef:        0.01      # exploration bonus coefficient
@@ -133,8 +133,10 @@ env:
                                          # "dummy"          → RandomDummyEnv (pipeline test only)
                                          # "language_table" → LanguageTableEnv (real LT sim)
   lt_velocity_scale:    0.03             # m/s — LT action space is [-0.03, 0.03]
-  lt_shaping_scale:     0.1              # dense shaping: reward += (d_prev - d_now) × scale
-                                         # set 0.0 to use sparse binary reward only
+  lt_shaping_scale:          0.1   # stage-2: block→block, reward += (d_prev-d_now)×scale
+  lt_effector_shaping_scale: 0.1   # stage-1: effector→nearest block (always fires; teaches reaching)
+                                   # Combined max without task success ≈ 0.63 < 1.0, so
+                                   # success_threshold=1.0 still detects real completions.
   instruction:          "complete the task"
   domain_randomization: false
   obs_noise_std:        5.0

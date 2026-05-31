@@ -433,12 +433,21 @@ class LanguageTableEnv(BaseEnv):
         self._img_size    = cfg["data"].get("img_size", 224)
         self._num_actions = cfg["model"]["num_actions"]
         self._vel_scale      = float(env_cfg.get("lt_velocity_scale", 0.03))
-        # Dense reward shaping: add ±(delta_dist × scale) each step so
-        # REINFORCE gets a gradient even when binary success reward = 0.
-        # Scale kept small (default 0.1) so shaped_total << 1.0 and
-        # success_threshold = 1.0 still correctly identifies task completion.
-        self._shaping_scale  = float(env_cfg.get("lt_shaping_scale", 0.1))
+        # ── Two-stage dense reward shaping ──────────────────────────────────────
+        # Stage 1 (effector → nearest block): rewards closing the distance from
+        # the end-effector to the nearest block. This fires every step regardless
+        # of contact, giving REINFORCE a gradient during the reaching phase.
+        # Stage 2 (block → block): fires only when the effector is pushing a
+        # block. Existing logic; kept at same scale as stage 1.
+        #
+        # Scale math: effector moves at most 0.03 m/step × 200 steps × 0.1 scale
+        # = 0.6 max shaped return from stage 1.  Block stage 2 adds ≤ 0.015.
+        # Combined max without task success ≈ 0.615 < 1.0, so success_threshold=1.0
+        # still correctly identifies task-completion episodes (raw reward = +1).
+        self._shaping_scale      = float(env_cfg.get("lt_shaping_scale",          0.1))
+        self._eff_shaping_scale  = float(env_cfg.get("lt_effector_shaping_scale", 0.1))
         self._prev_block_dist: Optional[float] = None
+        self._prev_eff_to_block: Optional[float] = None
         self._instruction    = "push the block to the target location"
         self._dm_env         = False   # True when env uses dm_env TimeStep API
 
@@ -660,6 +669,30 @@ class LanguageTableEnv(BaseEnv):
 
         return None   # shaping unavailable this step
 
+    def _get_eff_to_nearest_block(self, eff_xy: np.ndarray) -> Optional[float]:
+        """Minimum 2D distance from end-effector to any tracked block.
+
+        Used for stage-1 shaping: rewards the policy for moving the effector
+        toward the nearest block before contact has been made.  Returns None
+        when pybullet block positions are unavailable.
+        """
+        block_ids = getattr(self, "_pb_block_ids", None)
+        if not block_ids:
+            return None
+        pb = self._get_pb_client()
+        if pb is None:
+            return None
+        min_d = None
+        for bid in block_ids:
+            try:
+                pos = np.array(self._pb_get_pos(pb, bid)[:2], dtype=np.float32)
+                d   = float(np.linalg.norm(eff_xy - pos))
+                if min_d is None or d < min_d:
+                    min_d = d
+            except Exception:
+                continue
+        return min_d
+
     def _unpack_timestep(self, timestep):
         """Extract (obs_dict, reward, done) from a dm_env TimeStep or gym tuple."""
         # dm_env TimeStep: named tuple with .step_type / .reward / .observation
@@ -743,8 +776,13 @@ class LanguageTableEnv(BaseEnv):
             else:
                 print(f"[LT obs] type={type(obs).__name__} — not a dict, shaping disabled")
 
-        # Initialise shaped-reward baseline for this episode
-        self._prev_block_dist = self._get_block_dist(obs)
+        # Initialise shaped-reward baselines for this episode
+        self._prev_block_dist  = self._get_block_dist(obs)
+        # Stage-1 baseline: effector-to-nearest-block at episode start
+        if eff_xy is not None:
+            self._prev_eff_to_block = self._get_eff_to_nearest_block(eff_xy)
+        else:
+            self._prev_eff_to_block = None
         return {"frame": self._extract_frame(obs),
                 "instruction": self._extract_instruction(obs)}
 
@@ -755,12 +793,25 @@ class LanguageTableEnv(BaseEnv):
         result = self._env.step(vel)
         obs, reward, done = self._unpack_timestep(result)
 
-        # ── Dense reward shaping ─────────────────────────────────────────────
-        # Add (prev_dist − cur_dist) × scale each step.
-        # Positive when robot moves blocks closer → gives REINFORCE a gradient
-        # even when the sparse terminal reward is 0.  Scale = 0.1 keeps the
-        # total shaped reward well below 1.0 so success_threshold = 1.0 still
-        # correctly identifies task-completion episodes.
+        # ── Two-stage dense reward shaping ───────────────────────────────────
+        # Stage 1: effector → nearest block.  Fires every step; teaches the
+        #   policy to reach blocks before attempting to push them.
+        # Stage 2: block → block.  Fires only during contact / pushing.
+        #
+        # Combined max shaped return ≈ 0.615 per episode (200 steps × 0.03 m ×
+        # 0.1 scale for stage 1) + ≤ 0.015 for stage 2 = 0.63 < 1.0, so
+        # success_threshold = 1.0 still correctly detects task completion.
+        raw_reward = float(reward)   # env's binary success signal; kept for info
+
+        # Stage 1: effector-to-nearest-block shaping
+        if self._eff_shaping_scale > 0 and isinstance(obs, dict) and "effector_translation" in obs:
+            eff_xy_now = np.asarray(obs["effector_translation"], dtype=np.float32).ravel()[:2]
+            d_eff_now  = self._get_eff_to_nearest_block(eff_xy_now)
+            if d_eff_now is not None and self._prev_eff_to_block is not None:
+                reward += (self._prev_eff_to_block - d_eff_now) * self._eff_shaping_scale
+            self._prev_eff_to_block = d_eff_now
+
+        # Stage 2: block-to-block shaping
         if self._shaping_scale > 0:
             dist_now = self._get_block_dist(obs)
             if dist_now is not None and self._prev_block_dist is not None:
@@ -770,7 +821,7 @@ class LanguageTableEnv(BaseEnv):
         return (
             {"frame": self._extract_frame(obs),
              "instruction": self._extract_instruction(obs)},
-            reward, done, {},
+            reward, done, {"raw_reward": raw_reward},
         )
 
     def _extract_frame(self, obs) -> np.ndarray:

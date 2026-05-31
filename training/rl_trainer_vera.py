@@ -77,10 +77,11 @@ class RolloutBuffer:
         self.state_deltas:     List[torch.Tensor]          = []
         self.actions:          List[int]                   = []
         self.rewards:          List[float]                 = []
+        self.raw_rewards:      List[float]                 = []  # env reward before shaping
         self.dones:            List[bool]                  = []
 
     def add(self, frame, lang_tok, act_hist, rew_hist, act_vec_hist,
-            prev_a, prev_r, state_delta, action, reward, done):
+            prev_a, prev_r, state_delta, action, reward, done, raw_reward=None):
         self.frames.append(frame)
         self.lang_tokens.append(lang_tok)
         self.action_hists.append(act_hist)
@@ -91,6 +92,7 @@ class RolloutBuffer:
         self.state_deltas.append(state_delta)
         self.actions.append(action)
         self.rewards.append(reward)
+        self.raw_rewards.append(raw_reward if raw_reward is not None else reward)
         self.dones.append(done)
 
     def clear(self):
@@ -189,7 +191,8 @@ def collect_rollout(
         obs, reward, done, info = env.step(action)
 
         # Extract signed distance delta and the executed continuous action vector
-        _delta      = info.get("dist_delta") if isinstance(info, dict) else None
+        _delta        = info.get("dist_delta")   if isinstance(info, dict) else None
+        _raw_reward   = info.get("raw_reward", reward) if isinstance(info, dict) else reward
         state_delta_t = torch.tensor(
             [_delta if _delta is not None else 0.0], dtype=torch.float32
         )
@@ -218,6 +221,7 @@ def collect_rollout(
             action       = action,
             reward       = reward,
             done         = done,
+            raw_reward   = float(_raw_reward),
         )
 
         action_q.append(action)
@@ -660,6 +664,28 @@ def rl_train(cfg: dict):
     else:
         print("[rl_vera] Warning: no BC checkpoint — training RL from scratch.")
 
+    # ── High-entropy action-head initialisation ───────────────────────────────
+    # The SFT checkpoint was trained with chunk_size=4 and strong BC supervision,
+    # giving a very peaked (low-entropy) logit distribution.  Even after slicing
+    # to 8 rows the weights remain large → entropy ≈ 1.1 at epoch 0, close to the
+    # floor of 1.46 (0.7 × log 8).  REINFORCE cannot explore effectively from
+    # such a concentrated starting point.
+    #
+    # Fix: re-initialise ONLY the final linear layer of action_head to tiny weights
+    # (std = 0.01) so all 8 logits start near 0 → near-uniform policy → entropy ≈ 2.07.
+    # The rest of the action head (earlier layers) keeps the SFT representation.
+    _ah_last_linear = None
+    for _m in reversed(list(model.action_head.modules())):
+        if isinstance(_m, nn.Linear):
+            _ah_last_linear = _m
+            break
+    if _ah_last_linear is not None:
+        nn.init.normal_(_ah_last_linear.weight, std=0.01)
+        if _ah_last_linear.bias is not None:
+            nn.init.zeros_(_ah_last_linear.bias)
+        print(f"[rl_vera] Action head final layer re-init to std=0.01 "
+              f"→ near-uniform policy at epoch 0 (entropy ≈ log({_num_actions})={np.log(_num_actions):.2f})")
+
     # ── Freeze backbone; train action_head + visual domain adapter (TERA-RL) ───
     # 1. Freeze everything first.
     # 2. Unfreeze action_head (task policy, ~265K params).
@@ -712,14 +738,18 @@ def rl_train(cfg: dict):
             print(f"  rollout {ri+1}/{num_rollouts} ...", end=" ", flush=True)
             buf = collect_rollout(model, env, cfg, device, tokenizer_cache)
 
-            ep_steps  = len(buf.actions)
-            ep_return = sum(buf.rewards)
+            ep_steps     = len(buf.actions)
+            ep_return    = sum(buf.rewards)
+            # Use raw (pre-shaping) rewards for success detection so that effector
+            # shaping alone never triggers a false positive (max effector shaping
+            # ≈ 0.6 < success_threshold = 1.0; raw task reward = +1 on completion).
+            ep_raw_return = sum(buf.raw_rewards)
             cumulative_steps += ep_steps
             epoch_returns.append(ep_return)
-            epoch_successes.append(int(ep_return >= success_thr))
+            epoch_successes.append(int(ep_raw_return >= success_thr))
             epoch_lengths.append(ep_steps)
-            print(f"steps={ep_steps} return={ep_return:.3f} "
-                  f"{'✓' if ep_return >= success_thr else '✗'}", flush=True)
+            print(f"steps={ep_steps} return={ep_return:.3f} raw={ep_raw_return:.3f} "
+                  f"{'✓' if ep_raw_return >= success_thr else '✗'}", flush=True)
             epoch_bufs.append(buf)
 
         # ── Phase 2: ONE combined gradient update over all rollouts ──────────
