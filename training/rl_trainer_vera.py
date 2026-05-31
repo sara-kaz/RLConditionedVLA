@@ -349,6 +349,159 @@ def rl_update(
     }
 
 
+# ── Batch RL update (one gradient step over all rollouts in an epoch) ─────────
+
+def rl_update_batch(
+    model:      VERAModel,
+    value_head: ValueHead,
+    buffers:    List[RolloutBuffer],
+    optimizer:  torch.optim.Optimizer,
+    cfg:        dict,
+    device:     str,
+    bc_model:   Optional[VERAModel] = None,
+) -> dict:
+    """
+    REINFORCE + value-baseline update over an entire epoch of rollout buffers.
+
+    Returns are standardised **per buffer** before concatenation so that a
+    single high-reward episode cannot dominate the advantage signal — this is
+    the key stability improvement over the per-rollout update scheme.
+    All buffers are then concatenated into one forward / backward pass for a
+    lower-variance, better-calibrated gradient estimate.
+    """
+    model.train()
+    value_head.train()
+
+    _num_act      = cfg["model"]["num_actions"]
+    _action_dim   = cfg["model"].get("action_dim", 4)
+    gamma         = cfg["rl"].get("gamma", 0.99)
+    vf_coef       = cfg["rl"].get("vf_coef", 0.5)
+    entropy_coef  = cfg["rl"].get("entropy_coef", 0.01)
+    kl_coef       = cfg["rl"].get("kl_coef", 0.1)
+    entropy_floor = cfg["rl"].get("entropy_floor", 0.7)
+
+    # ── Collect per-buffer tensors, standardising returns within each buffer ──
+    all_returns      = []
+    all_frames       = []
+    all_lang_tokens  = []
+    all_act_hist     = []
+    all_rew_hist     = []
+    all_prev_actions = []
+    all_prev_rewards = []
+    all_state_deltas = []
+    all_actions      = []
+    all_act_vec_hist = []
+
+    for buf in buffers:
+        if len(buf.actions) == 0:
+            continue
+
+        # Per-buffer discounted returns, already standardised inside compute_returns()
+        returns = buf.compute_returns(gamma=gamma).to(device)
+        all_returns.append(returns)
+
+        all_frames.append(torch.stack(buf.frames))
+        all_lang_tokens.append(torch.stack(buf.lang_tokens))
+        all_act_hist.append(torch.stack(buf.action_hists))
+        all_rew_hist.append(torch.stack(buf.reward_hists))
+        all_prev_actions.append(torch.stack(buf.prev_actions).view(-1).long())
+        all_prev_rewards.append(torch.stack(buf.prev_rewards_fb).view(-1).float())
+        all_state_deltas.append(torch.stack(buf.state_deltas).view(-1).float())
+        all_actions.append(torch.tensor(buf.actions, dtype=torch.long))
+
+        # Low-level action vector history (H, action_dim) per step
+        # buf.action_hists[i] is shape (H,) — use first entry to get H
+        _history_len = buf.action_hists[0].size(0) if buf.action_hists else 0
+        if any(v is None for v in buf.action_vec_hists):
+            avh = torch.zeros(len(buf.action_vec_hists), _history_len, _action_dim)
+            for _i, _v in enumerate(buf.action_vec_hists):
+                if _v is not None:
+                    avh[_i] = _v
+        else:
+            avh = torch.stack(buf.action_vec_hists)  # (N_buf, H, action_dim)
+        all_act_vec_hist.append(avh)
+
+    if not all_returns:
+        # Nothing to learn from (all buffers empty — shouldn't happen)
+        return {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0,
+                "kl_loss":     0.0, "total_loss": 0.0, "mean_return": 0.0}
+
+    # ── Concatenate into one big batch ────────────────────────────────────────
+    returns      = torch.cat(all_returns,      dim=0)                         # (N_total,)
+    frames       = torch.cat(all_frames,       dim=0).to(device)              # (N_total, T, 3, H, W)
+    lang_tokens  = torch.cat(all_lang_tokens,  dim=0).to(device)              # (N_total, 77)
+    act_hist     = torch.cat(all_act_hist,     dim=0).to(device)              # (N_total, H)
+    rew_hist     = torch.cat(all_rew_hist,     dim=0).to(device)              # (N_total, H)
+    prev_actions = torch.cat(all_prev_actions, dim=0).to(device)              # (N_total,)
+    prev_rewards = torch.cat(all_prev_rewards, dim=0).to(device)              # (N_total,)
+    state_deltas = torch.cat(all_state_deltas, dim=0).to(device)              # (N_total,)
+    actions      = torch.cat(all_actions,      dim=0).to(device)              # (N_total,)
+    act_vec_hist = torch.cat(all_act_vec_hist, dim=0).to(device)              # (N_total, H, D_a)
+
+    # ── Single forward pass over combined batch ───────────────────────────────
+    out      = model(frames, lang_tokens, act_hist, rew_hist,
+                     prev_actions, prev_rewards,
+                     state_delta=state_deltas, action_vec_hist=act_vec_hist)
+    logits   = out["logits"][:, :_num_act]   # (N_total, A) — first chunk only
+    cls_feat = out["cls_features"]           # (N_total, D)
+
+    # Value estimate (detach policy grad; value head has its own path)
+    values    = value_head(cls_feat.detach())      # (N_total,)
+    advantage = returns - values.detach()           # Â_t = G_t - V(s_t)
+
+    # REINFORCE policy gradient
+    log_probs   = F.log_softmax(logits, dim=-1)
+    chosen_logp = log_probs[torch.arange(len(actions)), actions]
+    policy_loss = -(chosen_logp * advantage).mean()
+
+    # Value baseline MSE
+    value_loss = F.mse_loss(values, returns)
+
+    # Entropy bonus
+    probs   = F.softmax(logits, dim=-1)
+    entropy = -(probs * log_probs).sum(-1).mean()
+
+    # KL penalty vs BC anchor (prevents catastrophic forgetting)
+    kl_loss = torch.tensor(0.0, device=device)
+    if bc_model is not None:
+        bc_model.eval()
+        with torch.no_grad():
+            bc_out   = bc_model(frames, lang_tokens, act_hist, rew_hist,
+                                prev_actions, prev_rewards,
+                                state_delta=state_deltas,
+                                action_vec_hist=act_vec_hist)
+            bc_probs = F.softmax(bc_out["logits"][:, :_num_act], dim=-1)
+        kl_loss = F.kl_div(log_probs, bc_probs, reduction="batchmean")
+
+    # Entropy floor penalty (same as rl_update: penalise collapse only)
+    H_max           = torch.log(torch.tensor(float(_num_act)))
+    entropy_penalty = F.relu(entropy_floor * H_max - entropy)
+
+    total_loss = (policy_loss
+                  + vf_coef      * value_loss
+                  - entropy_coef * entropy
+                  + kl_coef      * kl_loss
+                  + entropy_penalty)
+
+    optimizer.zero_grad()
+    total_loss.backward()
+    nn.utils.clip_grad_norm_(
+        list(p for p in model.parameters() if p.requires_grad)
+        + list(value_head.parameters()),
+        cfg["rl"].get("grad_clip", 1.0),
+    )
+    optimizer.step()
+
+    return {
+        "policy_loss": policy_loss.item(),
+        "value_loss":  value_loss.item(),
+        "entropy":     entropy.item(),
+        "kl_loss":     kl_loss.item(),
+        "total_loss":  total_loss.item(),
+        "mean_return": returns.mean().item(),
+    }
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def rl_train(cfg: dict):
@@ -517,25 +670,30 @@ def rl_train(cfg: dict):
               f"({num_rollouts} rollouts × {max_ep_steps} steps) ──", flush=True)
         epoch_returns, epoch_successes, epoch_lengths = [], [], []
 
+        # ── Phase 1: collect all rollouts (model in eval, no gradient updates) ──
+        epoch_bufs  = []
+        success_thr = cfg.get("eval", {}).get("success_threshold", 1.0)
         for ri in range(num_rollouts):
             print(f"  rollout {ri+1}/{num_rollouts} ...", end=" ", flush=True)
-            buf     = collect_rollout(model, env, cfg, device, tokenizer_cache)
-            metrics = rl_update(model, value_head, buf, optimizer, cfg, device, bc_model)
+            buf = collect_rollout(model, env, cfg, device, tokenizer_cache)
 
-            # Track env steps for sample efficiency (steps = transitions in this rollout)
-            ep_steps = len(buf.actions)
+            ep_steps  = len(buf.actions)
+            ep_return = sum(buf.rewards)
             cumulative_steps += ep_steps
-
-            # Per-episode success: episode is successful if its total undiscounted
-            # return exceeds the success threshold (mirrors evaluate_vera logic)
-            success_thr = cfg.get("eval", {}).get("success_threshold", 1.0)
-            ep_return   = sum(buf.rewards)
             epoch_returns.append(ep_return)
             epoch_successes.append(int(ep_return >= success_thr))
             epoch_lengths.append(ep_steps)
             print(f"steps={ep_steps} return={ep_return:.3f} "
                   f"{'✓' if ep_return >= success_thr else '✗'}", flush=True)
+            epoch_bufs.append(buf)
 
+        # ── Phase 2: ONE combined gradient update over all rollouts ──────────
+        # Returns are standardised per-buffer inside rl_update_batch(), so a
+        # single high-reward episode cannot dominate the gradient signal.
+        metrics = rl_update_batch(
+            model, value_head, epoch_bufs, optimizer, cfg, device, bc_model
+        )
+        for buf in epoch_bufs:
             buf.clear()
 
         mean_ret     = float(np.mean(epoch_returns))
