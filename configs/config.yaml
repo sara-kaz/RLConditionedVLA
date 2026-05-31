@@ -124,7 +124,7 @@ rl:
   entropy_coef:        0.01      # exploration bonus coefficient
   entropy_floor:       0.7       # penalise entropy collapse below floor×H_max (H_max=log8≈2.08)
   vf_coef:             0.5       # value function loss weight
-  kl_coef:             0.1       # KL divergence penalty against BC policy
+  kl_coef:             0.05      # KL divergence penalty against BC policy (lowered: 0.1 was dominating policy gradient)
   minibatch_size:      64        # gradient-accumulation chunk size (keeps peak VRAM manageable)
 
 # ── Environment ────────────────────────────────────────────────────────────────

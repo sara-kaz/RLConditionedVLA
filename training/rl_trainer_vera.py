@@ -367,18 +367,20 @@ def rl_update_batch(
     """
     REINFORCE + value-baseline update over an entire epoch of rollout buffers.
 
-    Two key stability improvements over the per-rollout scheme:
+    Key design choices vs the old per-rollout update:
 
-    1. Per-buffer return standardisation: returns are normalised *within* each
-       episode buffer before concatenation, so a single high-reward rollout
-       cannot dominate the advantage signal.
+    1. Global return standardisation: raw discounted returns from all rollouts
+       are concatenated then standardised ONCE.  A success episode (G≈50/step)
+       gets advantages ~3× while failed episodes (G≈0) get ≈ -0.07 — the
+       success gradient genuinely dominates, so REINFORCE reinforces wins.
+       (Per-episode standardisation was erasing successes by mapping every
+       episode's returns to ±1, making a return=100 episode look identical to
+       a return=0.001 episode and diluting the signal into noise.)
 
-    2. Gradient accumulation: the combined N_total transitions (up to
-       num_rollouts × max_episode_steps = 3200 for the default 16×200 config)
-       are processed in mini-batches of `rl.minibatch_size` (default 64),
-       accumulating gradients across mini-batches and doing ONE optimizer step.
-       Peak VRAM is O(minibatch_size) rather than O(N_total), preventing OOM
-       when the BC model's CLIP forward pass follows the policy forward.
+    2. Gradient accumulation: the combined N_total transitions are processed in
+       mini-batches of `rl.minibatch_size` (default 64) to keep peak VRAM at
+       O(minibatch_size) rather than O(N_total) — prevents OOM when the BC CLIP
+       forward pass follows the policy forward on 16×200-step rollouts.
     """
     model.train()
     value_head.train()
@@ -409,9 +411,21 @@ def rl_update_batch(
         if len(buf.actions) == 0:
             continue
 
-        # Per-buffer discounted returns, already standardised inside compute_returns()
-        # Keep on CPU — will be sliced and moved per mini-batch
-        all_returns.append(buf.compute_returns(gamma=gamma))
+        # ── Raw discounted returns (NOT standardised per-buffer) ─────────────
+        # We deliberately skip per-buffer standardisation here.  Standardising
+        # each rollout independently would give the same ±1-scale advantages to
+        # a return=100 success episode as to a return=0.001 failed episode,
+        # diluting the learning signal from rare successes into noise.
+        # Instead we collect raw returns and standardise GLOBALLY below, so that
+        # the success episode's advantages (~3×) genuinely dominate the failed
+        # episodes' near-zero advantages, letting REINFORCE reinforce successes.
+        G, raw_rets = 0.0, []
+        for r, done in zip(reversed(buf.rewards), reversed(buf.dones)):
+            if done:
+                G = 0.0
+            G = r + gamma * G
+            raw_rets.insert(0, G)
+        all_returns.append(torch.tensor(raw_rets, dtype=torch.float32))   # CPU
 
         all_frames.append(torch.stack(buf.frames))                        # CPU
         all_lang_tokens.append(torch.stack(buf.lang_tokens))              # CPU
@@ -438,7 +452,7 @@ def rl_update_batch(
                 "kl_loss":     0.0, "total_loss": 0.0, "mean_return": 0.0}
 
     # ── Concatenate all buffers (still on CPU) ────────────────────────────────
-    returns_cpu      = torch.cat(all_returns,      dim=0)   # (N_total,)
+    returns_raw      = torch.cat(all_returns,      dim=0)   # (N_total,) — raw, unstandardised
     frames_cpu       = torch.cat(all_frames,       dim=0)   # (N_total, T, 3, H, W)
     lang_tokens_cpu  = torch.cat(all_lang_tokens,  dim=0)   # (N_total, 77)
     act_hist_cpu     = torch.cat(all_act_hist,     dim=0)   # (N_total, H)
@@ -448,6 +462,20 @@ def rl_update_batch(
     state_deltas_cpu = torch.cat(all_state_deltas, dim=0)   # (N_total,)
     actions_cpu      = torch.cat(all_actions,      dim=0)   # (N_total,)
     act_vec_hist_cpu = torch.cat(all_act_vec_hist, dim=0)   # (N_total, H, D_a)
+
+    # ── Global standardisation across ALL rollouts in the epoch ──────────────
+    # With 15 failed (G≈0) and 1 success (G≈50/step), global mean ≈ 1.17,
+    # global std ≈ 16.  Standardised advantages:
+    #   success episode:  (50 - 1.17) / 16 ≈ +3.0 per step
+    #   failed episodes:  ( 0 - 1.17) / 16 ≈ -0.07 per step
+    # The success gradient genuinely dominates (3× vs 0.07), so REINFORCE
+    # reinforces the successful behaviour rather than averaging it away.
+    # (With 0% success epochs all returns ≈ 0 and the gradient ≈ 0, which is
+    # correct — no meaningful update when nothing was learned.)
+    if returns_raw.std() > 1e-8:
+        returns_cpu = (returns_raw - returns_raw.mean()) / (returns_raw.std() + 1e-8)
+    else:
+        returns_cpu = returns_raw   # all-zero epoch → skip meaningful update
 
     N_total = len(actions_cpu)
     H_max   = torch.log(torch.tensor(float(_num_act)))
@@ -537,7 +565,7 @@ def rl_update_batch(
         "entropy":     acc_ent,
         "kl_loss":     acc_kl,
         "total_loss":  acc_total,
-        "mean_return": returns_cpu.mean().item(),
+        "mean_return": returns_raw.mean().item(),   # raw (unscaled) for readability
     }
 
 
