@@ -123,7 +123,7 @@ rl:
   grad_clip:           1.0
   entropy_coef:        0.01      # exploration bonus coefficient
   entropy_floor:       0.7       # penalise entropy collapse below floor×H_max (H_max=log8≈2.08)
-  vf_coef:             0.5       # value function loss weight
+  vf_coef:             0         # value function loss weight (0 = pure REINFORCE; backbone frozen so no forgetting risk)
   kl_coef:             0.05      # KL divergence penalty against BC policy (lowered: 0.1 was dominating policy gradient)
   minibatch_size:      64        # gradient-accumulation chunk size (keeps peak VRAM manageable)
 
@@ -134,7 +134,7 @@ env:
                                          # "language_table" → LanguageTableEnv (real LT sim)
   lt_velocity_scale:    0.03             # m/s — LT action space is [-0.03, 0.03]
   lt_shaping_scale:          0.1   # stage-2: block→block, reward += (d_prev-d_now)×scale
-  lt_effector_shaping_scale: 0.1   # stage-1: effector→nearest block (always fires; teaches reaching)
+  lt_effector_shaping_scale: 1.0   # stage-1: effector→nearest block (always fires; teaches reaching)
                                    # Combined max without task success ≈ 0.63 < 1.0, so
                                    # success_threshold=1.0 still detects real completions.
   instruction:          "complete the task"
