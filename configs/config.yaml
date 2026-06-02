@@ -122,7 +122,10 @@ rl:
   weight_decay:        1e-4
   grad_clip:           1.0
   entropy_coef:        0.01      # exploration bonus coefficient
-  entropy_floor:       0.7       # penalise entropy collapse below floor×H_max (H_max=log8≈2.08)
+  entropy_floor:       0.4       # penalise entropy collapse below floor×H_max (H_max=log8≈2.08)
+                                 # 0.4 → floor≈0.83, below SFT starting entropy≈1.10 so no penalty
+                                 # at start; 0.7 (old) → floor=1.46 > SFT entropy → constant
+                                 # penalty fought policy gradient from epoch 0, freezing entropy
   vf_coef:             0         # value function loss weight (0 = pure REINFORCE; backbone frozen so no forgetting risk)
   kl_coef:             0.05      # KL divergence penalty against BC policy (lowered: 0.1 was dominating policy gradient)
   minibatch_size:      64        # gradient-accumulation chunk size (keeps peak VRAM manageable)

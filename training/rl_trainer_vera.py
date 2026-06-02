@@ -692,45 +692,30 @@ def rl_train(cfg: dict):
     else:
         print("[rl_vera] Warning: no BC checkpoint — training RL from scratch.")
 
-    # ── High-entropy action-head initialisation ───────────────────────────────
-    # The SFT checkpoint was trained with chunk_size=4 and strong BC supervision,
-    # giving a very peaked (low-entropy) logit distribution.  Even after slicing
-    # to 8 rows the weights remain large → entropy ≈ 1.1 at epoch 0, close to the
-    # floor of 1.46 (0.7 × log 8).  REINFORCE cannot explore effectively from
-    # such a concentrated starting point.
+    # ── BC anchor already mirrors SFT weights (no re-init) ────────────────────
+    # Earlier experiments tried re-initialising the action head final layer to
+    # std=0.01 to force entropy≈2.07.  This backfired: with logits of magnitude
+    # 0.01, the gradient step (lr=3e-5) changes logits by ~4e-5 per epoch, which
+    # is immeasurably small — entropy stays pinned at 2.077 across hundreds of
+    # epochs and the policy never learns.
     #
-    # Fix: re-initialise ONLY the final linear layer of action_head to tiny weights
-    # (std = 0.01) so all 8 logits start near 0 → near-uniform policy → entropy ≈ 2.07.
-    # The rest of the action head (earlier layers) keeps the SFT representation.
-    _ah_last_linear = None
-    for _m in reversed(list(model.action_head.modules())):
-        if isinstance(_m, nn.Linear):
-            _ah_last_linear = _m
-            break
-    if _ah_last_linear is not None:
-        nn.init.normal_(_ah_last_linear.weight, std=0.01)
-        if _ah_last_linear.bias is not None:
-            nn.init.zeros_(_ah_last_linear.bias)
-        print(f"[rl_vera] Action head final layer re-init to std=0.01 "
-              f"→ near-uniform policy at epoch 0 (entropy ≈ log({_num_actions})={np.log(_num_actions):.2f})")
-
-    # ── Sync BC anchor to the re-initialised model ────────────────────────────
-    # The BC model was created from the SFT weights BEFORE the action-head
-    # re-init above.  At this point the RL model is near-uniform (entropy≈2.07)
-    # while bc_model still has the SFT concentrated weights → KL≈0.82 at epoch 0,
-    # a constant large penalty that fights both the policy gradient and the entropy
-    # bonus.  We sync bc_model here so:
-    #   • KL starts at 0 (both models identical at epoch 0)
-    #   • KL grows naturally only as the RL policy diverges from its starting
-    #     point during learning — acting as a well-calibrated regulariser rather
-    #     than a fixed attractor toward the SFT distribution.
-    # Since the backbone is FROZEN (no catastrophic forgetting risk exists for
-    # vision/language weights), the only function of the KL anchor is to
-    # prevent the ACTION HEAD from collapsing to a single action after a lucky
-    # success.  Anchoring at the re-init (uniform) state serves this perfectly.
+    # The SFT checkpoint already produces entropy≈1.10 at epoch 0 from its first-8
+    # rows.  That is NOT collapsed (H/H_max ≈ 0.53; p_max ≈ 0.25–0.30), and the
+    # SFT policy already achieves ~6% task success from episode 1 — a strong
+    # bootstrap signal that uniform random policy never provides.
+    #
+    # We therefore skip re-init and let RL fine-tune from the SFT distribution.
+    # The entropy floor (config: entropy_floor, set to 0.4 → H_floor≈0.83) acts
+    # as the safety net against catastrophic collapse, WITHOUT fighting the policy
+    # gradient from the very first epoch.
+    #
+    # bc_model was already synced to model (SFT weights) at creation above.
+    # The re-sync here is redundant but kept as a defensive guard in case any
+    # weight initialisation happens between the two sites.
     if bc_model is not None:
         bc_model.load_state_dict(model.state_dict())
-        print(f"[rl_vera] BC anchor synced to re-init weights → KL ≈ 0 at epoch 0")
+        print(f"[rl_vera] BC anchor synced to SFT weights → KL ≈ 0 at epoch 0 "
+              f"(entropy ≈ {np.log(_num_actions):.2f} floor, SFT policy as starting point)")
 
     # ── Freeze backbone; train action_head + visual domain adapter (TERA-RL) ───
     # 1. Freeze everything first.
