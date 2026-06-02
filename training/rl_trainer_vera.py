@@ -714,6 +714,24 @@ def rl_train(cfg: dict):
         print(f"[rl_vera] Action head final layer re-init to std=0.01 "
               f"→ near-uniform policy at epoch 0 (entropy ≈ log({_num_actions})={np.log(_num_actions):.2f})")
 
+    # ── Sync BC anchor to the re-initialised model ────────────────────────────
+    # The BC model was created from the SFT weights BEFORE the action-head
+    # re-init above.  At this point the RL model is near-uniform (entropy≈2.07)
+    # while bc_model still has the SFT concentrated weights → KL≈0.82 at epoch 0,
+    # a constant large penalty that fights both the policy gradient and the entropy
+    # bonus.  We sync bc_model here so:
+    #   • KL starts at 0 (both models identical at epoch 0)
+    #   • KL grows naturally only as the RL policy diverges from its starting
+    #     point during learning — acting as a well-calibrated regulariser rather
+    #     than a fixed attractor toward the SFT distribution.
+    # Since the backbone is FROZEN (no catastrophic forgetting risk exists for
+    # vision/language weights), the only function of the KL anchor is to
+    # prevent the ACTION HEAD from collapsing to a single action after a lucky
+    # success.  Anchoring at the re-init (uniform) state serves this perfectly.
+    if bc_model is not None:
+        bc_model.load_state_dict(model.state_dict())
+        print(f"[rl_vera] BC anchor synced to re-init weights → KL ≈ 0 at epoch 0")
+
     # ── Freeze backbone; train action_head + visual domain adapter (TERA-RL) ───
     # 1. Freeze everything first.
     # 2. Unfreeze action_head (task policy, ~265K params).
