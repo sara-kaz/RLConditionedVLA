@@ -137,9 +137,14 @@ env:
                                          # "language_table" → LanguageTableEnv (real LT sim)
   lt_velocity_scale:    0.03             # m/s — LT action space is [-0.03, 0.03]
   lt_shaping_scale:          0.1   # stage-2: block→block, reward += (d_prev-d_now)×scale
-  lt_effector_shaping_scale: 1.0   # stage-1: effector→nearest block (always fires; teaches reaching)
-                                   # Combined max without task success ≈ 0.63 < 1.0, so
-                                   # success_threshold=1.0 still detects real completions.
+  lt_effector_shaping_scale: 0.0   # stage-1: effector→nearest block — DISABLED
+                                   # The SFT policy approaches the block from behind (relative to
+                                   # the target) to push it, so raw effector-to-block distance
+                                   # increases during correct approach, giving negative shaping.
+                                   # This penalises the SFT distribution and drives entropy UP
+                                   # toward uniform, destroying task-success capability.
+                                   # Rely on sparse success (+1) + block-to-block shaping (0.1)
+                                   # amplified by global return standardisation instead.
   instruction:          "complete the task"
   domain_randomization: false
   obs_noise_std:        5.0
