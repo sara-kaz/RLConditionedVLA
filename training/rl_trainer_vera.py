@@ -757,6 +757,22 @@ def rl_train(cfg: dict):
     sr_patience      = int(cfg["rl"].get("sr_patience", 0))   # 0 = disabled
     epochs_no_sr_imp = 0   # counter
 
+    # ── Success-trajectory replay buffer ──────────────────────────────────────
+    # Sparse task reward (raw ≥ 1.0) means most epochs have 0 successes.  With
+    # batch REINFORCE, a 0-success epoch produces near-zero return variance →
+    # gradient ≈ noise → the policy random-walks away from what worked.
+    #
+    # Fix: keep a reference to the most recently successful rollout buffer and
+    # inject it into the batch on 0-success epochs.  The global standardisation
+    # in rl_update_batch() will then give the replayed success high advantage
+    # (≈+3.5) vs near-zero for current failures, providing a consistent "push
+    # block to target" gradient every epoch regardless of current luck.
+    #
+    # Memory: one rollout buffer ≈ 200 steps × CPU tensors ≈ <100 MB.
+    # Policy staleness: KL ≈ 0.17 after 25 epochs — old trajectory is nearly
+    # on-policy; the small off-policy bias is acceptable given the benefit.
+    success_replay_buf: Optional[RolloutBuffer] = None
+
     for epoch in range(1, int(cfg["rl"]["epochs"]) + 1):
         print(f"\n── Epoch {epoch}/{int(cfg['rl']['epochs'])} "
               f"({num_rollouts} rollouts × {max_ep_steps} steps) ──", flush=True)
@@ -783,14 +799,32 @@ def rl_train(cfg: dict):
                   f"{'✓' if ep_raw_return >= success_thr else '✗'}", flush=True)
             epoch_bufs.append(buf)
 
+            # Update success replay: keep reference to the most recent success buf.
+            # The buf is already in epoch_bufs; we preserve it from the clear() below.
+            if ep_raw_return >= success_thr:
+                if success_replay_buf is not None and success_replay_buf not in epoch_bufs:
+                    success_replay_buf.clear()   # free memory from previous epoch's success
+                success_replay_buf = buf         # do NOT clear this buf at epoch end
+
         # ── Phase 2: ONE combined gradient update over all rollouts ──────────
-        # Returns are standardised per-buffer inside rl_update_batch(), so a
-        # single high-reward episode cannot dominate the gradient signal.
+        # On 0-success epochs the replayed success trajectory is prepended to the
+        # batch.  Global standardisation will give it advantages ≈+3.5 vs near-0
+        # for current failures — a consistent "push block to target" gradient.
+        epoch_has_success = any(sum(b.raw_rewards) >= success_thr for b in epoch_bufs)
+        bufs_for_update = epoch_bufs
+        if not epoch_has_success and success_replay_buf is not None:
+            bufs_for_update = [success_replay_buf] + epoch_bufs
+            print(f"  [replay] Injecting success replay "
+                  f"({len(success_replay_buf.actions)} steps, "
+                  f"raw={sum(success_replay_buf.raw_rewards):.0f})", flush=True)
+
         metrics = rl_update_batch(
-            model, value_head, epoch_bufs, optimizer, cfg, device, bc_model
+            model, value_head, bufs_for_update, optimizer, cfg, device, bc_model
         )
+        # Clear epoch_bufs but preserve success_replay_buf so it survives to next epoch
         for buf in epoch_bufs:
-            buf.clear()
+            if buf is not success_replay_buf:
+                buf.clear()
 
         mean_ret     = float(np.mean(epoch_returns))
         mean_success = float(np.mean(epoch_successes))
