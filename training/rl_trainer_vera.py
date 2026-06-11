@@ -210,7 +210,7 @@ def collect_rollout(
             )
 
         buf.add(
-            frame        = frames_t.cpu(),
+            frame        = frames_t.half().cpu(),   # float16: halves RAM (5.8→2.9 GB/16 rollouts)
             lang_tok     = lang_tok,
             act_hist     = act_hist_in.squeeze(0).cpu(),
             rew_hist     = rew_hist_in.squeeze(0).cpu(),
@@ -495,7 +495,7 @@ def rl_update_batch(
 
         # Move this mini-batch to GPU
         mb_ret      = returns_cpu     [mb_s:mb_e].to(device)
-        mb_frames   = frames_cpu      [mb_s:mb_e].to(device)
+        mb_frames   = frames_cpu      [mb_s:mb_e].float().to(device)   # restore float32 from stored float16
         mb_lang     = lang_tokens_cpu [mb_s:mb_e].to(device)
         mb_ah       = act_hist_cpu    [mb_s:mb_e].to(device)
         mb_rh       = rew_hist_cpu    [mb_s:mb_e].to(device)
